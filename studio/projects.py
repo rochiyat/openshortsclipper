@@ -183,7 +183,19 @@ def save_job(s: Session, bridge: JobBridge, job_id: str, *, title: Optional[str]
         return project
 
 
-def list_projects(s: Session, *, q: str = "", status: str = "active",
+def all_tags(s: Session) -> list:
+    """[{tag, count}] over every project, most used first."""
+    counts = {}
+    for raw in s.scalars(select(Project.tags_json)):
+        try:
+            for t in json.loads(raw or "[]"):
+                counts[t] = counts.get(t, 0) + 1
+        except ValueError:
+            continue
+    return [{"tag": t, "count": n} for t, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def list_projects(s: Session, *, q: str = "", status: str = "active", tag: str = "",
                   limit: int = 50, offset: int = 0):
     stmt = select(Project).options(selectinload(Project.clips))
     count = select(func.count(Project.id))
@@ -193,6 +205,13 @@ def list_projects(s: Session, *, q: str = "", status: str = "active",
     if q:
         like = f"%{q.strip()}%"
         cond = or_(Project.title.ilike(like), Project.source_url.ilike(like))
+        stmt = stmt.where(cond)
+        count = count.where(cond)
+    if tag:
+        # JSON array of strings: match the quoted element exactly.
+        needle = json.dumps(tag.strip().lower()).replace("\\", "\\\\")
+        needle = needle.replace("%", "\\%").replace("_", "\\_")
+        cond = Project.tags_json.like(f"%{needle}%", escape="\\")
         stmt = stmt.where(cond)
         count = count.where(cond)
     limit = max(1, min(int(limit), 200))
@@ -220,8 +239,24 @@ def find_by_job(s: Session, job_id: str) -> Optional[Project]:
 _UNSET = object()
 
 
+def normalize_tags(tags) -> list:
+    if not isinstance(tags, list):
+        raise StudioError("tags must be a list of strings")
+    out = []
+    for t in tags:
+        if not isinstance(t, str):
+            raise StudioError("tags must be a list of strings")
+        t = " ".join(t.strip().lower().lstrip("#").split())[:40]
+        if t and t not in out:
+            out.append(t)
+    if len(out) > 20:
+        raise StudioError("at most 20 tags per project")
+    return out
+
+
 def update_project(project: Project, *, title=None, rights=None, rights_note=None,
-                   status=None, campaign_id=_UNSET, s: Optional[Session] = None) -> Project:
+                   status=None, campaign_id=_UNSET, tags=None,
+                   s: Optional[Session] = None) -> Project:
     if title is not None:
         title = title.strip()[:200]
         if not title:
@@ -237,6 +272,8 @@ def update_project(project: Project, *, title=None, rights=None, rights_note=Non
         if status not in PROJECT_STATUSES:
             raise StudioError(f"status must be one of: {', '.join(PROJECT_STATUSES)}")
         project.status = status
+    if tags is not None:
+        project.tags_json = json.dumps(normalize_tags(tags), ensure_ascii=False)
     if campaign_id is not _UNSET:
         campaign = None
         if campaign_id:

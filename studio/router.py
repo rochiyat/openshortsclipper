@@ -10,8 +10,8 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from . import (catalog, db, posts, projects, publishers, publishing, review, scheduler,
-               storage, youtube_oauth)
+from . import (catalog, copywriter, db, posts, projects, publishers, publishing, review,
+               scheduler, storage, summary, youtube_oauth)
 from .models import Clip, Post, Project, PublishJob, now_iso
 from .projects import JobBridge, StudioError
 
@@ -82,6 +82,7 @@ def _project_out(p: Project, with_clips: bool = False) -> dict:
         "size_bytes": p.size_bytes,
         "campaign_id": p.campaign_id,
         "campaign_name": p.campaign.name if p.campaign else None,
+        "tags": p.tags,
         "clip_count": len(clips),
         "review_counts": _review_counts(clips),
         "cover_url": _media_url(p.id, clips[0].file_name) if clips else None,
@@ -105,6 +106,7 @@ class UpdateProjectRequest(BaseModel):
     rights_note: Optional[str] = None
     status: Optional[str] = None
     campaign_id: Optional[str] = None
+    tags: Optional[list] = None
 
 
 class UpdateClipRequest(BaseModel):
@@ -166,10 +168,10 @@ def save_project(req: SaveProjectRequest, s: Session = Depends(db.get_session)):
 
 
 @router.get("/projects")
-def list_projects(q: str = "", status: str = "active",
+def list_projects(q: str = "", status: str = "active", tag: str = "",
                   limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
                   s: Session = Depends(db.get_session)):
-    rows, total = projects.list_projects(s, q=q, status=status, limit=limit, offset=offset)
+    rows, total = projects.list_projects(s, q=q, status=status, tag=tag, limit=limit, offset=offset)
     return {"projects": [_project_out(p) for p in rows], "total": total}
 
 
@@ -195,7 +197,8 @@ def update_project(project_id: str, req: UpdateProjectRequest,
         p = projects.get_project(s, project_id)
         extra = {"campaign_id": req.campaign_id} if "campaign_id" in req.model_fields_set else {}
         projects.update_project(p, title=req.title, rights=req.rights,
-                                rights_note=req.rights_note, status=req.status, s=s, **extra)
+                                rights_note=req.rights_note, status=req.status, tags=req.tags,
+                                s=s, **extra)
     except StudioError as e:
         _raise(e)
     return {"project": _project_out(p, with_clips=True)}
@@ -675,3 +678,69 @@ def youtube_disconnect(channel_id: str, s: Session = Depends(db.get_session)):
         _raise(e)
     youtube_oauth.disconnect(ch.id)
     return {"channel": catalog.channel_out(ch)}
+
+
+# ---- phase 5: overview, tags, bulk review, copy rewrite, backup ------------------
+
+class BulkReviewRequest(BaseModel):
+    clip_ids: list
+    review_status: str
+    force: bool = False
+
+
+class RewriteRequest(BaseModel):
+    language: Optional[str] = None
+    channel_id: Optional[str] = None
+
+
+@router.get("/summary")
+def overview(s: Session = Depends(db.get_session)):
+    return summary.overview(s)
+
+
+@router.get("/tags")
+def tags(s: Session = Depends(db.get_session)):
+    return {"tags": projects.all_tags(s)}
+
+
+@router.post("/clips/bulk")
+def bulk_review(req: BulkReviewRequest, s: Session = Depends(db.get_session)):
+    try:
+        return review.bulk_status(s, req.clip_ids, req.review_status, force=req.force)
+    except StudioError as e:
+        _raise(e)
+
+
+@router.post("/clips/{clip_id}/rewrite")
+def rewrite_clip(clip_id: str, req: RewriteRequest, request: Request,
+                 s: Session = Depends(db.get_session)):
+    """Suggested copy in the channel's language (default Indonesian). Not saved."""
+    try:
+        clip = review.get_clip(s, clip_id)
+        channel = catalog.get_channel(s, req.channel_id) if req.channel_id else None
+    except StudioError as e:
+        _raise(e)
+    language = (req.language or (channel.language if channel else None) or "id").strip()
+    current = {"title": clip.title, "hook_text": clip.hook_text, "caption": clip.caption,
+               "hashtags": clip.hashtags}
+    s.commit()  # release the DB before a slow model call
+    try:
+        suggestion = copywriter.rewrite(current, language, channel.platform if channel else None,
+                                        gemini_key=request.headers.get("X-Gemini-Key"))
+    except copywriter.CopyError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"language": language, "suggestion": suggestion}
+
+
+@router.get("/backup/status")
+def backup_status():
+    return scheduler.backup_status()
+
+
+@router.post("/backup/run", status_code=202)
+def backup_run():
+    from . import backup
+    if not backup.configured():
+        raise HTTPException(status_code=400, detail="Set STUDIO_BACKUP_BUCKET and its access keys first")
+    started = scheduler.trigger_backup()
+    return {"started": started, **scheduler.backup_status()}

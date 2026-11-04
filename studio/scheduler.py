@@ -19,6 +19,9 @@ from .models import Setting, now_iso
 _LAST_RUN_KEY = "snapshots.last_run"
 _task: Optional[asyncio.Task] = None
 _publish_task: Optional[asyncio.Task] = None
+_backup_task: Optional[asyncio.Task] = None
+_BACKUP_KEY = "backup.last"
+_backup_lock = threading.Lock()
 PUBLISH_TICK_SECONDS = 30
 _lock = threading.Lock()
 _state = {"running": False, "last_summary": None}
@@ -159,6 +162,75 @@ async def _publish_loop():
         await asyncio.sleep(PUBLISH_TICK_SECONDS)
 
 
+def _setting(key: str):
+    with db.session() as s:
+        row = s.get(Setting, key)
+        try:
+            return json.loads(row.value) if row and row.value else None
+        except ValueError:
+            return None
+
+
+def _set_setting(key: str, value):
+    with db.session() as s:
+        row = s.get(Setting, key)
+        if row is None:
+            s.add(Setting(key=key, value=json.dumps(value)))
+        else:
+            row.value = json.dumps(value)
+
+
+def backup_status() -> dict:
+    from . import backup
+    cfg = backup.settings()
+    return {"configured": backup.configured(), "running": _backup_lock.locked(),
+            "interval_days": cfg["interval_days"], "bucket": cfg["bucket"] or None,
+            "prefix": cfg["prefix"], "last": _setting(_BACKUP_KEY)}
+
+
+def run_backup() -> Optional[dict]:
+    """One backup pass unless one is running. Records the outcome. Blocking."""
+    from . import backup
+    if not _backup_lock.acquire(blocking=False):
+        return None
+    try:
+        try:
+            summary = backup.run()
+            record = {"at": now_iso(), "ok": True, "summary": summary}
+        except Exception as e:  # noqa: BLE001 — recorded and shown, never raised to the loop
+            record = {"at": now_iso(), "ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+        _set_setting(_BACKUP_KEY, record)
+        return record
+    finally:
+        _backup_lock.release()
+
+
+def trigger_backup() -> bool:
+    if _backup_lock.locked():
+        return False
+    threading.Thread(target=run_backup, name="studio-backup", daemon=True).start()
+    return True
+
+
+async def _backup_loop():
+    from . import backup
+    while True:
+        try:
+            cfg = backup.settings()
+            if backup.configured() and cfg["interval_days"] > 0:
+                last = _setting(_BACKUP_KEY) or {}
+                at = datetime.fromisoformat(last["at"]) if last.get("at") else None
+                # After a failure try again in a day, not a full interval.
+                wait = timedelta(days=cfg["interval_days"] if last.get("ok") else 1)
+                if at is None or datetime.now(timezone.utc) - at >= wait:
+                    await asyncio.to_thread(run_backup)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ Studio backup loop: {type(e).__name__}: {e}")
+        await asyncio.sleep(3600)
+
+
 def kick_publisher():
     """Process due publish jobs now, off the request thread."""
     from . import publishing
@@ -168,8 +240,10 @@ def kick_publisher():
 def start():
     """Start the daily snapshot loop and the publish queue once per process
     (called from the app lifespan)."""
-    global _task, _publish_task
+    global _task, _publish_task, _backup_task
     loop = asyncio.get_running_loop()
+    if _backup_task is None or _backup_task.done():
+        _backup_task = loop.create_task(_backup_loop())
     if _publish_task is None or _publish_task.done():
         _publish_task = loop.create_task(_publish_loop())
     if enabled() and (_task is None or _task.done()):

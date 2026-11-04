@@ -37,8 +37,8 @@ const json = (body) => ({
 
 export const studioHealth = () => apiJson('/api/studio/health');
 
-export const listProjects = ({ q = '', status = 'active', limit = 50, offset = 0 } = {}) => {
-  const params = new URLSearchParams({ q, status, limit: String(limit), offset: String(offset) });
+export const listProjects = ({ q = '', status = 'active', tag = '', limit = 50, offset = 0 } = {}) => {
+  const params = new URLSearchParams({ q, status, tag, limit: String(limit), offset: String(offset) });
   return apiJson(`/api/studio/projects?${params}`);
 };
 
@@ -160,3 +160,27 @@ export const youtubeConnectUrl = (channelId) =>
   apiJson(`/api/studio/youtube/connect?channel_id=${encodeURIComponent(channelId)}&origin=${encodeURIComponent(window.location.origin)}`);
 export const youtubeDisconnect = (channelId) =>
   apiJson(`/api/studio/channels/${channelId}/youtube/disconnect`, { method: 'POST' });
+
+// ---- overview, tags, bulk review, copy rewrite, backup ----
+export const studioSummary = () => apiJson('/api/studio/summary');
+export const listTags = () => apiJson('/api/studio/tags');
+export const bulkReview = (clipIds, reviewStatus, force = false) =>
+  apiJson('/api/studio/clips/bulk', {
+    method: 'POST', ...json({ clip_ids: clipIds, review_status: reviewStatus, force }),
+  });
+export const rewriteClip = (clipId, { language, channelId } = {}, geminiKey = '') =>
+  apiJson(`/api/studio/clips/${clipId}/rewrite`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(geminiKey ? { 'X-Gemini-Key': geminiKey } : {}) },
+    body: JSON.stringify({ language: language || null, channel_id: channelId || null }),
+  });
+export const backupStatus = () => apiJson('/api/studio/backup/status');
+export const runBackup = () => apiJson('/api/studio/backup/run', { method: 'POST' });
+
+export const REWRITE_LANGUAGES = [
+  { value: 'id', label: 'indonesian' },
+  { value: 'en', label: 'english' },
+  { value: 'ms', label: 'malay' },
+  { value: 'jv', label: 'javanese' },
+  { value: 'su', label: 'sundanese' },
+];

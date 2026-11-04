@@ -168,6 +168,10 @@ MIGRATIONS = [
         "CREATE INDEX ix_publish_jobs_due ON publish_jobs(status, scheduled_at)",
         "CREATE INDEX ix_publish_jobs_clip ON publish_jobs(clip_id, channel_id)",
     ]),
+    (5, [
+        # Free-form project tags, stored as a JSON array of lowercase strings.
+        "ALTER TABLE projects ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+    ]),
 ]
 
 LATEST = MIGRATIONS[-1][0]

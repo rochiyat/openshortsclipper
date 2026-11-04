@@ -1,6 +1,6 @@
 # Studio: rencana fitur project, posting & views (self-host)
 
-Status: Fase 0–4 selesai (YouTube diprioritaskan) · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
+Status: Fase 0–5 selesai (YouTube diprioritaskan) · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
 
 ## 1. Tujuan
 
@@ -281,12 +281,12 @@ Batasan Google: video yang diupload lewat API project yang belum lolos audit You
 
 Catatan batasan platform (cek dokumentasi terbaru sebelum mulai): kuota YouTube Data API per upload besar; TikTok Content Posting API untuk app yang belum diaudit umumnya hanya bisa posting private; Instagram/Threads butuh akun Business/Creator + app review Meta. Karena itu adapter `manual` tetap jadi jalur utama.
 
-### Fase 5 — Polish (berkelanjutan)
+### Fase 5 — Polish ✅
 
-- [ ] Backup `studio.db` + `projects/` ke R2/S3 (pakai `s3_uploader.py`, endpoint R2), jadwal mingguan.
-- [ ] Preset bahasa Indonesia: default model whisper, prompt hook & judul berbahasa Indonesia per channel.
-- [ ] Dashboard ringkasan: views minggu ini, top clip, estimasi payout bulan berjalan.
-- [ ] Tag/folder project, bulk action.
+- [x] **Backup ke R2/S3** (`studio/backup.py`, klien S3 sendiri karena `s3_uploader.py` tidak mendukung endpoint R2): snapshot `studio.db` yang konsisten (SQLite online backup API, aman saat app menulis) dalam gzip, file project diupload hanya bila baru/berubah ukuran, simpan `STUDIO_BACKUP_KEEP` salinan DB terakhir. `secrets/` (token YouTube) **tidak** ikut. Otomatis tiap `STUDIO_BACKUP_INTERVAL_DAYS` (default 7; gagal → dicoba lagi besok), tombol **back up now**, status di Overview. Restore: `python -m studio.backup restore` ke `STUDIO_DIR` kosong (menolak menimpa `studio.db`, mengabaikan key yang mencoba keluar dari folder projects).
+- [x] **Bahasa Indonesia**: di pipeline cukup konfigurasi (whisper sudah default, parakeet otomatis jatuh ke whisper untuk Indonesia, hook/judul Gemini mengikuti bahasa transkrip); rekomendasi `WHISPER_MODEL=large-v3-turbo` di `.env.example`. Di Studio: tombol **rewrite copy** di review queue (`POST /clips/{id}/rewrite`) menulis ulang judul/hook/caption/hashtag ke bahasa pilihan (default Indonesia, gaya santai ala kreator), lewat Gemini (key dari settings atau `GEMINI_API_KEY`) atau LLM lokal bila `LLM_BASE_URL` diset. Hanya mengisi form; disimpan saat kamu save/approve.
+- [x] **Overview** (tab default, `GET /summary`): views 7 hari (vs minggu sebelumnya), views hari ini, estimasi payout campaign aktif, antrean review, grafik kenaikan views per hari (14 hari, zona `STUDIO_TZ`), top 5 post, payout per campaign, daftar "needs attention" (publish gagal, post tanpa URL, gagal baca views, clip approved dari sumber hak cipta unknown), status backup. Kenaikan harian dihitung dari snapshot; post yang dicatat terlambat tidak menimbulkan lonjakan palsu.
+- [x] **Tag project** (migrasi 5): tag bebas per project (huruf kecil, tanpa duplikat, maks 20), filter chip di daftar project, `GET /tags`. **Bulk** approve/reject semua draft dalam satu project (`POST /clips/bulk`), dengan peringatan hak cipta yang sama.
 
 ## 7. Titik sentuh di kode upstream
 

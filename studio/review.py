@@ -69,6 +69,30 @@ def _text(value, limit):
     return value[:limit] or None
 
 
+def bulk_status(s: Session, clip_ids, review_status: str, *, force: bool = False) -> dict:
+    """Move many clips at once. Posted clips are skipped, never changed; an
+    approval touching a project with unknown rights needs ``force`` (all or none)."""
+    if review_status not in REVIEWABLE_STATUSES:
+        raise StudioError(f"review_status must be one of: {', '.join(REVIEWABLE_STATUSES)}")
+    ids = [i for i in dict.fromkeys(clip_ids or []) if storage.valid_id(i)][:500]
+    clips = s.scalars(select(Clip).where(Clip.id.in_(ids))).unique().all() if ids else []
+    if review_status == "approved" and not force and any(
+            c.project.rights == "unknown" and c.review_status != "posted" for c in clips):
+        raise RightsUnconfirmed()
+    changed, skipped = 0, 0
+    ts = now_iso()
+    for c in clips:
+        if c.review_status == "posted":
+            skipped += 1
+            continue
+        if c.review_status != review_status:
+            c.review_status = review_status
+            c.reviewed_at = ts if review_status != "draft" else None
+            c.updated_at = ts
+            changed += 1
+    return {"changed": changed, "skipped_posted": skipped, "not_found": len(ids) - len(clips)}
+
+
 def update_clip(clip: Clip, data: dict, *, force: bool = False) -> Clip:
     """Edit the clip's copy and/or move it through review.
 

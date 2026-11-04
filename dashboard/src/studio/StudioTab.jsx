@@ -1,18 +1,20 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Loader2, Film, FolderOpen, Download, ArrowLeft, Search, Archive, ArchiveRestore,
-  Trash2, Pencil, Check, X, Copy, ExternalLink, ListChecks,
+  Trash2, Pencil, Check, X, Copy, ExternalLink, ListChecks, Tag, CheckCheck, Ban,
 } from 'lucide-react';
 import {
   listProjects, getProject, updateProject, deleteProject, reopenProject, listCampaigns, listClips,
-  mediaUrl, RIGHTS_OPTIONS, formatBytes, formatDate,
+  listTags, bulkReview, mediaUrl, RIGHTS_OPTIONS, formatBytes, formatDate,
 } from './api';
+import OverviewPage from './OverviewPage';
 import ReviewQueue from './ReviewQueue';
 import CampaignsPage from './CampaignsPage';
 import ChannelsPage from './ChannelsPage';
 import PostsPage from './PostsPage';
 
 const SECTIONS = [
+  { id: 'overview', label: 'overview' },
   { id: 'projects', label: 'projects' },
   { id: 'review', label: 'review' },
   { id: 'posts', label: 'posts' },
@@ -23,8 +25,8 @@ const SECTIONS = [
 // Self-host workspace (studio/). Saved projects live outside the job dirs, so
 // they outlast JOB_RETENTION_SECONDS; "reopen" copies one back into the Clip
 // Generator. Review, campaigns and channels prepare clips for posting.
-export default function StudioTab({ onReopened }) {
-  const [section, setSection] = useState('projects');
+export default function StudioTab({ onReopened, geminiKey }) {
+  const [section, setSection] = useState('overview');
   const [view, setView] = useState({ name: 'list' });
   const [reviewProject, setReviewProject] = useState('');
   const [counts, setCounts] = useState(null);
@@ -58,6 +60,7 @@ export default function StudioTab({ onReopened }) {
         ))}
       </div>
 
+      {section === 'overview' && <OverviewPage onGo={openSection} />}
       {section === 'projects' && (view.name === 'detail'
         ? <ProjectDetail
             id={view.id}
@@ -67,7 +70,8 @@ export default function StudioTab({ onReopened }) {
           />
         : <ProjectList onOpen={(id) => setView({ name: 'detail', id })} />)}
       {section === 'review' && (
-        <ReviewQueue key={reviewProject} initialProjectId={reviewProject} onCountsChange={setCounts} />
+        <ReviewQueue key={reviewProject} initialProjectId={reviewProject} onCountsChange={setCounts}
+          geminiKey={geminiKey} />
       )}
       {section === 'posts' && <PostsPage />}
       {section === 'campaigns' && <CampaignsPage />}
@@ -80,8 +84,14 @@ function ProjectList({ onOpen }) {
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('active');
+  const [tag, setTag] = useState('');
+  const [tags, setTags] = useState([]);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    listTags().then((d) => setTags(d.tags || [])).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(q.trim()), 250);
@@ -91,11 +101,11 @@ function ProjectList({ onOpen }) {
   useEffect(() => {
     let alive = true;
     setError('');
-    listProjects({ q: query, status, limit: 200 })
+    listProjects({ q: query, status, tag, limit: 200 })
       .then((d) => { if (alive) setData(d); })
       .catch(() => { if (alive) setError('could not load your projects.'); });
     return () => { alive = false; };
-  }, [query, status]);
+  }, [query, status, tag]);
 
   return (
     <div className="animate-fade">
@@ -127,6 +137,18 @@ function ProjectList({ onOpen }) {
         </div>
       </div>
 
+      {tags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 -mt-3 mb-6" role="group" aria-label="Filter by tag">
+          {tags.map((t) => (
+            <button key={t.tag} onClick={() => setTag((cur) => (cur === t.tag ? '' : t.tag))}
+              className={`px-2.5 py-1 rounded-full border text-xs transition-colors ${tag === t.tag
+                ? 'border-brass text-ink bg-paper3' : 'border-rule text-muted hover:text-ink'}`}>
+              #{t.tag} <span className="opacity-60">{t.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {error && <p className="text-danger text-sm">{error}</p>}
       {!data && !error && <div className="flex justify-center py-20"><Loader2 className="animate-spin text-brass" /></div>}
 
@@ -134,7 +156,7 @@ function ProjectList({ onOpen }) {
         <div className="text-center py-20 text-muted">
           <Film size={40} className="mx-auto mb-4 text-muted" />
           <p className="lowercase">
-            {query || status === 'archived'
+            {query || tag || status === 'archived'
               ? 'no projects match.'
               : 'no saved projects yet. Generate clips, then press “save to projects”.'}
           </p>
@@ -167,6 +189,9 @@ function ProjectList({ onOpen }) {
                       {p.review_counts?.draft > 0 && p.campaign_name && ' · '}
                       {p.campaign_name}
                     </p>
+                  )}
+                  {p.tags?.length > 0 && (
+                    <p className="text-xs text-muted mt-1 truncate">{p.tags.map((t) => `#${t}`).join(' ')}</p>
                   )}
                 </div>
               </button>
@@ -208,6 +233,27 @@ function ProjectDetail({ id, onBack, onReopened, onReview }) {
     } catch (e) {
       setError(e?.detail || 'could not save the change.');
       return false;
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const bulk = async (reviewStatus) => {
+    const ids = project.clips.filter((c) => c.review_status === 'draft').map((c) => c.id);
+    if (!ids.length) return;
+    setBusy(`bulk-${reviewStatus}`);
+    setError('');
+    try {
+      try {
+        await bulkReview(ids, reviewStatus);
+      } catch (e) {
+        if (e?.code !== 'rights_unknown') throw e;
+        if (!window.confirm(`${e.message}\n\nApprove all anyway?`)) return;
+        await bulkReview(ids, reviewStatus, true);
+      }
+      load();
+    } catch (e) {
+      setError(e?.detail || 'could not update the clips.');
     } finally {
       setBusy('');
     }
@@ -327,6 +373,8 @@ function ProjectDetail({ id, onBack, onReopened, onReview }) {
               )}
             </select>
           </label>
+          <TagEditor tags={project.tags || []} disabled={busy === 'tags'}
+            onSave={(tags) => patch({ tags }, 'tags')} />
         </div>
 
         <div className="flex flex-wrap gap-2 shrink-0">
@@ -351,6 +399,18 @@ function ProjectDetail({ id, onBack, onReopened, onReview }) {
       </div>
 
       {error && <p className="text-danger text-sm mb-4">{error}</p>}
+
+      {project.review_counts?.draft > 0 && (
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <span className="readout">{project.review_counts.draft} draft clip{project.review_counts.draft === 1 ? '' : 's'}:</span>
+          <button onClick={() => bulk('approved')} disabled={!!busy} className="btn-ghost px-3 py-1.5 text-xs">
+            {busy === 'bulk-approved' ? <Loader2 size={12} className="animate-spin" /> : <CheckCheck size={12} />} approve all
+          </button>
+          <button onClick={() => bulk('rejected')} disabled={!!busy} className="btn-ghost px-3 py-1.5 text-xs">
+            {busy === 'bulk-rejected' ? <Loader2 size={12} className="animate-spin" /> : <Ban size={12} />} reject all
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
         {project.clips.map((c) => <ClipCard key={c.id} clip={c} />)}
@@ -408,5 +468,31 @@ function ClipCard({ clip }) {
         <CopyField label="caption" value={clip.caption} />
       </div>
     </div>
+  );
+}
+
+// Comma-separated tags, saved on enter/blur. The server lowercases and dedupes.
+function TagEditor({ tags, onSave, disabled }) {
+  const [value, setValue] = useState(tags.join(', '));
+  useEffect(() => { setValue(tags.join(', ')); }, [tags]);
+  const save = () => {
+    const next = value.split(',').map((t) => t.trim()).filter(Boolean);
+    if (next.join(',') !== tags.join(',')) onSave(next);
+  };
+  return (
+    <label className="flex items-center gap-2 mt-2 text-xs text-muted lowercase">
+      <Tag size={12} className="shrink-0" />
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); save(); } }}
+        disabled={disabled}
+        placeholder="tags, comma separated"
+        maxLength={400}
+        className="input-field text-xs py-1 flex-1 min-w-0"
+        aria-label="Project tags"
+      />
+    </label>
   );
 }

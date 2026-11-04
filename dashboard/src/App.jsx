@@ -2081,7 +2081,7 @@ function App() {
           {activeTab === 'projects' && studioEnabled && (
             <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
               <div className="max-w-6xl mx-auto p-4 sm:p-6 md:p-8">
-                <StudioTab onReopened={reopenStudioProject} />
+                <StudioTab onReopened={reopenStudioProject} geminiKey={apiKey} />
               </div>
             </div>
           )}

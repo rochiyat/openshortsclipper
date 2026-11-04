@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, Check, X, RotateCcw, ChevronLeft, ChevronRight, ShieldAlert, Save, Film, Send, Upload } from 'lucide-react';
+import { Loader2, Check, X, RotateCcw, ChevronLeft, ChevronRight, ShieldAlert, Save, Film, Send, Upload, Sparkles } from 'lucide-react';
 import RecordPostModal from './RecordPostModal';
 import PublishModal from './PublishModal';
 import {
-  listClips, updateClip, updateProject, listCampaigns, mediaUrl, RIGHTS_OPTIONS,
+  listClips, updateClip, updateProject, listCampaigns, mediaUrl, RIGHTS_OPTIONS, rewriteClip,
+  REWRITE_LANGUAGES,
 } from './api';
 
 const STATUSES = ['draft', 'approved', 'rejected', 'posted'];
@@ -14,7 +15,7 @@ const isTyping = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAR
 
 // Every saved clip passes here before posting: fix the copy, then approve or
 // reject. Keys: A approve · R reject · ← / → previous / next (not while typing).
-export default function ReviewQueue({ initialProjectId = '', onCountsChange }) {
+export default function ReviewQueue({ initialProjectId = '', onCountsChange, geminiKey = '' }) {
   const [status, setStatus] = useState('draft');
   const [campaignId, setCampaignId] = useState('');
   const [projectId, setProjectId] = useState(initialProjectId);
@@ -26,6 +27,8 @@ export default function ReviewQueue({ initialProjectId = '', onCountsChange }) {
   const [error, setError] = useState('');
   const [recording, setRecording] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [rewriteLang, setRewriteLang] = useState('id');
+  const [rewriting, setRewriting] = useState(false);
   const [notice, setNotice] = useState('');
 
   useEffect(() => {
@@ -212,6 +215,36 @@ export default function ReviewQueue({ initialProjectId = '', onCountsChange }) {
                 >
                   {RIGHTS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
+              </div>
+            )}
+
+            {!posted && (
+              <div className="flex flex-wrap items-center gap-2 mt-4">
+                <select value={rewriteLang} onChange={(e) => setRewriteLang(e.target.value)}
+                  className="input-field text-xs py-1.5 w-auto" aria-label="Rewrite language">
+                  {REWRITE_LANGUAGES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+                </select>
+                <button
+                  type="button"
+                  disabled={rewriting || !!busy}
+                  className="btn-ghost px-3 py-1.5 text-xs"
+                  title="Suggest title, hook, caption and hashtags in this language. Nothing is saved until you save or approve."
+                  onClick={async () => {
+                    setRewriting(true);
+                    setError('');
+                    try {
+                      const { suggestion } = await rewriteClip(clip.id, { language: rewriteLang }, geminiKey);
+                      setDraft((d) => ({ ...d, ...suggestion }));
+                    } catch (e) {
+                      setError(e?.detail || 'could not rewrite the copy.');
+                    } finally {
+                      setRewriting(false);
+                    }
+                  }}
+                >
+                  {rewriting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} rewrite copy
+                </button>
+                {dirty && <span className="readout">unsaved changes</span>}
               </div>
             )}
 

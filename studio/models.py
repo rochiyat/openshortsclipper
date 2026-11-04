@@ -51,8 +51,17 @@ class Project(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     campaign_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    tags_json: Mapped[str] = mapped_column("tags", Text, default="[]")
     created_at: Mapped[str] = mapped_column(String, default=now_iso)
     updated_at: Mapped[str] = mapped_column(String, default=now_iso)
+
+    @property
+    def tags(self) -> list:
+        try:
+            value = json.loads(self.tags_json or "[]")
+        except ValueError:
+            return []
+        return [t for t in value if isinstance(t, str)] if isinstance(value, list) else []
 
     campaign: Mapped["Campaign | None"] = relationship(lazy="joined")
     clips: Mapped[list["Clip"]] = relationship(
