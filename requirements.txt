@@ -18,3 +18,5 @@ python-multipart==0.0.27
 httpx==0.28.1
 Pillow==12.2.0
 beautifulsoup4==4.14.3
+# Studio (self-host saved projects, SQLite). Same pin as requirements-billing.txt.
+sqlalchemy==2.0.36

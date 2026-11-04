@@ -1,6 +1,6 @@
 # Studio: rencana fitur project, posting & views (self-host)
 
-Status: draft · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
+Status: Fase 0–1 selesai · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
 
 ## 1. Tujuan
 
@@ -79,6 +79,16 @@ tests/
   test_studio_metrics.py
   test_studio_payout.py
 ```
+
+### Konfigurasi (env)
+
+| Variabel | Default | Fungsi |
+|---|---|---|
+| `STUDIO_ENABLED` | `1` | Matikan Studio di self-host dengan `0` (di Cloud selalu mati) |
+| `STUDIO_DIR` | `studio_data` | Lokasi `studio.db` dan `projects/` |
+| `STUDIO_LINK_MODE` | `link` | `link` = hardlink file media bila satu filesystem (hemat disk), `copy` = selalu salin |
+
+Hardlink hanya jalan bila `studio_data/` dan `output/` ada di mount yang sama. Linux menolak hardlink antar mount point (EXDEV), termasuk dua bind mount dari disk yang sama. Di `docker-compose.yml` bawaan keduanya mount terpisah, jadi Studio otomatis **menyalin** file. Hasilnya tetap benar, hanya pakai disk dua kali selama job asli belum dihapus cleanup.
 
 ## 4. Skema SQLite
 
@@ -193,23 +203,23 @@ donasi         = payout * donation_pct / 100
 
 Estimasi untuk 1 developer, sudah termasuk test.
 
-### Fase 0 — Persiapan (½ hari)
+### Fase 0 — Persiapan (½ hari) ✅
 
-- [ ] Tambah remote upstream, catat cara sync: `git fetch upstream && git merge upstream/main`.
-- [ ] Tambah `sqlalchemy==2.0.36` ke `requirements.txt` (pin sama dengan `requirements-billing.txt`).
-- [ ] Tambah volume `studio_data/` di `docker-compose.yml` dan `.gitignore`.
-- [ ] Kerangka `studio/` + `GET /api/studio/health`; include router di `app.py` (1 baris + guard).
+- [ ] Tambah remote upstream di mesin lokal, lalu sync: `git fetch upstream && git merge upstream/main`.
+- [x] Tambah `sqlalchemy==2.0.36` ke `requirements.txt` (pin sama dengan `requirements-billing.txt`).
+- [x] Tambah volume `studio_data/` di `docker-compose.yml` dan `.gitignore`.
+- [x] Kerangka `studio/` + `GET /api/studio/health`; include router di `app.py` (guard `STUDIO_ENABLED`).
 
 **Selesai bila**: `pytest tests/ -v` hijau, `/api/studio/health` → `{"ok": true, "schema": 1}`.
 
-### Fase 1 — Project tersimpan + SQLite (2–3 hari)
+### Fase 1 — Project tersimpan + SQLite (2–3 hari) ✅
 
-- [ ] `db.py`: engine SQLite, PRAGMA, `init_db()` dipanggil di lifespan.
-- [ ] Model `projects`, `clips`, `settings`.
-- [ ] `storage.save_job_as_project(job_id)`: baca `output/{job_id}/*_metadata.json`, salin clip + thumbnail (pakai hardlink bila satu filesystem, fallback copy), hitung `sha256`.
-- [ ] Endpoint project (list/detail/patch/delete/reopen) + `/media`.
-- [ ] Opsi `STUDIO_AUTOSAVE=true`: hook kecil di titik job selesai (dekat archive Cloud di `app.py`) yang memanggil `studio.on_job_completed(job_id)`. Default off; tombol manual tetap ada.
-- [ ] Dashboard: tab **Studio → Projects** (grid kartu, search, buka detail, putar clip, download, reopen). Tombol **Save to Studio** di halaman hasil job.
+- [x] `studio/db.py`: engine SQLite (WAL, FK, busy_timeout), `studio.init()` dipanggil di lifespan; migrasi di `studio/migrations.py`.
+- [x] Model `projects`, `clips`, `settings` (`studio/models.py`).
+- [x] `studio/projects.save_job()`: snapshot seluruh folder job ke `projects/{id}/files/` (media di-hardlink, metadata/subtitle disalin), dot-file dilewati, source video hanya bila `include_source`, `sha256` per clip. Simpan ulang = re-sync, status review tetap.
+- [x] Endpoint project (save/list/by-job/detail/patch/delete/reopen) + `/api/studio/media` (Range didukung, path traversal ditolak).
+- [x] Keputusan: **simpan hanya lewat tombol**, tanpa auto-save.
+- [x] Dashboard: tab **Projects** (grid, search, active/archived, detail, putar, download, salin hook/caption, rename, rights, archive, delete, reopen). Tombol **save to projects** (+ opsi `+ source`) di samping *download all*.
 
 **Selesai bila**: job selesai → disimpan → restart container dan tunggu > `JOB_RETENTION_SECONDS` → project dan clip masih bisa diputar dan di-reopen.
 

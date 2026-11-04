@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, FolderOpen } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
@@ -26,6 +26,9 @@ import TrialGate from './components/TrialGate';
 import AdvancedBanner from './components/AdvancedBanner';
 import HistoryTab from './components/HistoryTab';
 import AutopilotTab from './components/AutopilotTab';
+import StudioTab from './studio/StudioTab';
+import SaveToStudioButton from './studio/SaveToStudioButton';
+import { studioHealth } from './studio/api';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
@@ -371,6 +374,8 @@ function App() {
   });
   const [processingMedia, setProcessingMedia] = useState(null);
   const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
+  // Self-host Studio (saved projects, studio/): on when the backend serves it.
+  const [studioEnabled, setStudioEnabled] = useState(false);
   // Mobile only: the full nav lives in a drawer behind the header's menu button.
   const [navOpen, setNavOpen] = useState(false);
   // Reopened-project state (paid mode): per-clip {index, server_file, active_layers}
@@ -601,6 +606,32 @@ function App() {
     setStatus('complete');
     setActiveTab('dashboard');
   };
+
+  // Reopen a saved Studio project: the backend copied its files back into
+  // output/ and answers with the job's result, like the cloud restore above.
+  const reopenStudioProject = async (data) => {
+    flushClipState();
+    setProjectState(data.project_state || null);
+    // The source video is back on disk only when it was saved with the project.
+    setNoSource(!data.has_source);
+    setJobId(data.job_id);
+    setResults(data.result || null);
+    setLogs(['♻️ Project reopened from Projects.']);
+    setLogTimes([Date.now() / 1000]);
+    setProcessingMedia(data.has_source ? { type: 'server', payload: `/api/source/${data.job_id}` } : null);
+    setQualityGate(null);
+    setStatus('complete');
+    setActiveTab('dashboard');
+  };
+
+  useEffect(() => {
+    if (authLoading || billingEnabled) { setStudioEnabled(false); return undefined; }
+    let alive = true;
+    studioHealth()
+      .then((d) => { if (alive) setStudioEnabled(!!d?.ok); })
+      .catch(() => { if (alive) setStudioEnabled(false); });
+    return () => { alive = false; };
+  }, [authLoading, billingEnabled]);
 
   // Apply one subtitle style to every clip of the job, sequentially.
   const handleBulkSubtitles = async (options) => {
@@ -1295,6 +1326,7 @@ function App() {
     { id: 'ugc-gallery', ord: '05', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery', primary: true },
     { id: 'thumbnails', ord: '06', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
     ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
+    ...(studioEnabled ? [{ id: 'projects', ord: '07', icon: FolderOpen, label: 'Projects', short: 'projects' }] : []),
     { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
@@ -2045,6 +2077,15 @@ function App() {
             </div>
           )}
 
+          {/* View: Projects (self-host Studio) */}
+          {activeTab === 'projects' && studioEnabled && (
+            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
+              <div className="max-w-6xl mx-auto p-4 sm:p-6 md:p-8">
+                <StudioTab onReopened={reopenStudioProject} />
+              </div>
+            </div>
+          )}
+
           {activeTab === 'thumbnails' && (
             <ThumbnailStudio
               geminiApiKey={apiKey}
@@ -2249,6 +2290,7 @@ function App() {
                   </h2>
                   {results?.clips?.length > 0 && status === 'complete' && (
                     <div className="flex flex-col sm:flex-row sm:justify-end items-stretch sm:items-center gap-2">
+                      {studioEnabled && <SaveToStudioButton jobId={jobId} />}
                       <button
                         onClick={handleDownloadAll}
                         disabled={downloadingAll}
@@ -2389,7 +2431,11 @@ function App() {
                     {!billingEnabled && jobRetentionSeconds > 0 && (
                       <div className="px-3 py-2.5 rounded-input bg-paper3 border border-paper3 text-sm">
                         <span className="text-ink">Clips are kept for {formatRetention(jobRetentionSeconds)}, then deleted.</span>{' '}
-                        <span className="text-muted">Download what you want to keep, or raise JOB_RETENTION_SECONDS in your env.</span>
+                        <span className="text-muted">
+                          {studioEnabled
+                            ? 'Press “save to projects” to keep them, or download what you need.'
+                            : 'Download what you want to keep, or raise JOB_RETENTION_SECONDS in your env.'}
+                        </span>
                       </div>
                     )}
                   </div>
