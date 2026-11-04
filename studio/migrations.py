@@ -54,6 +54,48 @@ MIGRATIONS = [
         )
         """,
     ]),
+    (2, [
+        """
+        CREATE TABLE channels (
+            id               TEXT PRIMARY KEY,
+            name             TEXT NOT NULL,
+            platform         TEXT NOT NULL,
+            handle           TEXT,
+            language         TEXT,
+            caption_preset   TEXT,
+            watermark_text   TEXT,
+            publisher        TEXT NOT NULL DEFAULT 'manual',
+            publisher_config TEXT,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            archived_at      TEXT
+        )
+        """,
+        """
+        CREATE TABLE campaigns (
+            id               TEXT PRIMARY KEY,
+            name             TEXT NOT NULL,
+            platform_source  TEXT,
+            brief_url        TEXT,
+            cpm              REAL NOT NULL DEFAULT 0,
+            currency         TEXT NOT NULL DEFAULT 'USD',
+            min_views        INTEGER NOT NULL DEFAULT 0,
+            max_payout       REAL,
+            starts_at        TEXT,
+            ends_at          TEXT,
+            donation_pct     REAL NOT NULL DEFAULT 0,
+            status           TEXT NOT NULL DEFAULT 'active',
+            notes            TEXT,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL
+        )
+        """,
+        "ALTER TABLE projects ADD COLUMN campaign_id TEXT "
+        "REFERENCES campaigns(id) ON DELETE SET NULL",
+        "ALTER TABLE clips ADD COLUMN hashtags TEXT",
+        "CREATE INDEX ix_projects_campaign ON projects(campaign_id)",
+        "CREATE INDEX ix_campaigns_status ON campaigns(status)",
+    ]),
 ]
 
 LATEST = MIGRATIONS[-1][0]

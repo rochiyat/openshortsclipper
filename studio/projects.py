@@ -217,8 +217,11 @@ def find_by_job(s: Session, job_id: str) -> Optional[Project]:
     return s.scalars(select(Project).where(Project.job_id == job_id)).first()
 
 
+_UNSET = object()
+
+
 def update_project(project: Project, *, title=None, rights=None, rights_note=None,
-                   status=None) -> Project:
+                   status=None, campaign_id=_UNSET, s: Optional[Session] = None) -> Project:
     if title is not None:
         title = title.strip()[:200]
         if not title:
@@ -234,6 +237,15 @@ def update_project(project: Project, *, title=None, rights=None, rights_note=Non
         if status not in PROJECT_STATUSES:
             raise StudioError(f"status must be one of: {', '.join(PROJECT_STATUSES)}")
         project.status = status
+    if campaign_id is not _UNSET:
+        campaign = None
+        if campaign_id:
+            from .models import Campaign
+            if storage.valid_id(campaign_id) and s is not None:
+                campaign = s.get(Campaign, campaign_id)
+            if campaign is None:
+                raise StudioError("Campaign not found", 404)
+        project.campaign = campaign  # sets campaign_id and the loaded relation
     project.updated_at = now_iso()
     return project
 

@@ -1,21 +1,76 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Loader2, Film, FolderOpen, Download, ArrowLeft, Search, Archive, ArchiveRestore,
-  Trash2, Pencil, Check, X, Copy, ExternalLink,
+  Trash2, Pencil, Check, X, Copy, ExternalLink, ListChecks,
 } from 'lucide-react';
 import {
-  listProjects, getProject, updateProject, deleteProject, reopenProject,
+  listProjects, getProject, updateProject, deleteProject, reopenProject, listCampaigns, listClips,
   mediaUrl, RIGHTS_OPTIONS, formatBytes, formatDate,
 } from './api';
+import ReviewQueue from './ReviewQueue';
+import CampaignsPage from './CampaignsPage';
+import ChannelsPage from './ChannelsPage';
 
-// Self-host project library (studio/). Saved projects live outside the job
-// dirs, so they outlast JOB_RETENTION_SECONDS; "reopen" copies one back into
-// the Clip Generator for more editing.
+const SECTIONS = [
+  { id: 'projects', label: 'projects' },
+  { id: 'review', label: 'review' },
+  { id: 'campaigns', label: 'campaigns' },
+  { id: 'channels', label: 'channels' },
+];
+
+// Self-host workspace (studio/). Saved projects live outside the job dirs, so
+// they outlast JOB_RETENTION_SECONDS; "reopen" copies one back into the Clip
+// Generator. Review, campaigns and channels prepare clips for posting.
 export default function StudioTab({ onReopened }) {
+  const [section, setSection] = useState('projects');
   const [view, setView] = useState({ name: 'list' });
-  return view.name === 'detail'
-    ? <ProjectDetail id={view.id} onBack={() => setView({ name: 'list' })} onReopened={onReopened} />
-    : <ProjectList onOpen={(id) => setView({ name: 'detail', id })} />;
+  const [reviewProject, setReviewProject] = useState('');
+  const [counts, setCounts] = useState(null);
+
+  useEffect(() => {
+    listClips({ reviewStatus: 'draft', limit: 1 }).then((d) => setCounts(d.counts)).catch(() => {});
+  }, []);
+
+  const openSection = (id) => {
+    setSection(id);
+    if (id !== 'review') setReviewProject('');
+    if (id === 'projects') setView({ name: 'list' });
+  };
+
+  return (
+    <div className="animate-fade">
+      <p className="eyebrow mb-1.5">07 · PROJECTS</p>
+      <div className="flex flex-wrap gap-1.5 mb-6 border-b border-rule pb-3">
+        {SECTIONS.map((s) => (
+          <button
+            key={s.id}
+            onClick={() => openSection(s.id)}
+            className={`px-3 py-1.5 text-sm lowercase rounded-input transition-colors ${section === s.id
+              ? 'bg-paper3 text-ink' : 'text-muted hover:text-ink'}`}
+          >
+            {s.label}
+            {s.id === 'review' && counts?.draft > 0 && (
+              <span className="badge-brass ml-1.5">{counts.draft}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {section === 'projects' && (view.name === 'detail'
+        ? <ProjectDetail
+            id={view.id}
+            onBack={() => setView({ name: 'list' })}
+            onReopened={onReopened}
+            onReview={(pid) => { setReviewProject(pid); setSection('review'); }}
+          />
+        : <ProjectList onOpen={(id) => setView({ name: 'detail', id })} />)}
+      {section === 'review' && (
+        <ReviewQueue key={reviewProject} initialProjectId={reviewProject} onCountsChange={setCounts} />
+      )}
+      {section === 'campaigns' && <CampaignsPage />}
+      {section === 'channels' && <ChannelsPage />}
+    </div>
+  );
 }
 
 function ProjectList({ onOpen }) {
@@ -41,7 +96,6 @@ function ProjectList({ onOpen }) {
 
   return (
     <div className="animate-fade">
-      <p className="eyebrow mb-1.5">07 · PROJECTS</p>
       <h1 className="font-display lowercase text-2xl text-ink mb-2">Your projects</h1>
       <p className="text-muted text-sm mb-6 lowercase">
         Clips you saved with “save to projects”. They stay here after the job expires. Reopen a project to keep editing it.
@@ -104,6 +158,13 @@ function ProjectList({ onOpen }) {
                   <p className="readout">
                     {formatDate(p.created_at)} · {p.clip_count} clip{p.clip_count === 1 ? '' : 's'} · {formatBytes(p.size_bytes)}
                   </p>
+                  {(p.campaign_name || p.review_counts?.draft > 0) && (
+                    <p className="readout mt-0.5 truncate">
+                      {p.review_counts?.draft > 0 && `${p.review_counts.draft} to review`}
+                      {p.review_counts?.draft > 0 && p.campaign_name && ' · '}
+                      {p.campaign_name}
+                    </p>
+                  )}
                 </div>
               </button>
             ))}
@@ -114,8 +175,9 @@ function ProjectList({ onOpen }) {
   );
 }
 
-function ProjectDetail({ id, onBack, onReopened }) {
+function ProjectDetail({ id, onBack, onReopened, onReview }) {
   const [project, setProject] = useState(null);
+  const [campaigns, setCampaigns] = useState([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [editingTitle, setEditingTitle] = useState(false);
@@ -129,6 +191,9 @@ function ProjectDetail({ id, onBack, onReopened }) {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    listCampaigns().then((d) => setCampaigns(d.campaigns || [])).catch(() => {});
+  }, []);
 
   const patch = async (body, label) => {
     setBusy(label);
@@ -244,9 +309,30 @@ function ProjectDetail({ id, onBack, onReopened }) {
               {RIGHTS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </label>
+          <label className="flex items-center gap-2 mt-2 text-xs text-muted lowercase">
+            campaign
+            <select
+              value={project.campaign_id || ''}
+              onChange={(e) => patch({ campaign_id: e.target.value || null }, 'campaign')}
+              disabled={busy === 'campaign'}
+              className="input-field text-xs py-1"
+            >
+              <option value="">none</option>
+              {campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {project.campaign_id && !campaigns.some((c) => c.id === project.campaign_id) && (
+                <option value={project.campaign_id}>{project.campaign_name || 'current'}</option>
+              )}
+            </select>
+          </label>
         </div>
 
         <div className="flex flex-wrap gap-2 shrink-0">
+          {onReview && (
+            <button onClick={() => onReview(project.id)} className="btn-ghost px-3 py-2 text-xs"
+              title="Review this project's clips">
+              <ListChecks size={14} /> review{project.review_counts?.draft > 0 && ` (${project.review_counts.draft})`}
+            </button>
+          )}
           <button onClick={handleReopen} disabled={!!busy} className="btn-primary px-3 py-2 text-xs"
             title="Open this project in the Clip Generator to keep editing">
             {busy === 'reopen' ? <><Loader2 size={14} className="animate-spin" /> reopening…</> : <><FolderOpen size={14} /> reopen</>}

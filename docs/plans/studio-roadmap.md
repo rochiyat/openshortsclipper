@@ -1,6 +1,6 @@
 # Studio: rencana fitur project, posting & views (self-host)
 
-Status: Fase 0–1 selesai · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
+Status: Fase 0–2 selesai · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
 
 ## 1. Tujuan
 
@@ -189,7 +189,9 @@ donasi         = payout * donation_pct / 100
 | GET | `/clips` | review queue, filter `review_status` |
 | PATCH | `/clips/{id}` | edit title/hook/caption, ubah status |
 | GET | `/media/{path}` | serve file dari `STUDIO_DIR` (path guard seperti `test_media_path_guard`) |
-| CRUD | `/channels`, `/campaigns` | |
+| GET/POST/PATCH | `/channels` | archive lewat `PATCH {archived: true}` |
+| CRUD | `/campaigns` | + `GET /campaigns/{id}/estimate?views=` |
+| GET/PATCH | `/clips` | review queue; `force: true` melewati peringatan rights |
 | GET | `/campaigns/{id}/report` | views, estimasi payout, donasi per post |
 | POST | `/posts` | publish via adapter **atau** catat URL manual |
 | GET | `/posts` | filter channel, platform, campaign, tanggal |
@@ -223,13 +225,14 @@ Estimasi untuk 1 developer, sudah termasuk test.
 
 **Selesai bila**: job selesai → disimpan → restart container dan tunggu > `JOB_RETENTION_SECONDS` → project dan clip masih bisa diputar dan di-reopen.
 
-### Fase 2 — Review queue, campaign, channel, hak cipta (2–3 hari)
+### Fase 2 — Review queue, campaign, channel, hak cipta (2–3 hari) ✅
 
-- [ ] Model `channels`, `campaigns`; kolom `rights` di project.
-- [ ] Review queue: daftar clip `draft`, edit hook/caption/hashtag inline, approve/reject, keyboard shortcut (A/R/→).
-- [ ] Halaman Channels: profil per akun (bahasa, preset caption, watermark).
-- [ ] Halaman Campaigns: CPM, min views, brief, periode, % donasi.
-- [ ] Peringatan saat approve clip dari project ber-`rights = unknown`.
+- [x] Migrasi 2: tabel `channels`, `campaigns`; kolom `projects.campaign_id` (`ON DELETE SET NULL`) dan `clips.hashtags`. DB versi 1 di-upgrade tanpa kehilangan data.
+- [x] Review queue (`studio/review.py`, `GET/PATCH /api/studio/clips`): filter status/campaign/project, edit title/hook/caption/hashtag, approve/reject/kembali ke draft. Shortcut **A** approve, **R** reject, **← →** pindah clip. `posted` tidak bisa diset manual (nanti diisi Fase 3).
+- [x] Halaman Channels: nama, platform, handle, bahasa, watermark, preset caption (`default_hashtags`, `caption_suffix`), archive. Preset baru dipakai saat posting di Fase 3.
+- [x] Halaman Campaigns: CPM, mata uang, min views, max payout per post, periode, % donasi, brief, catatan, status, statistik clip per status, dan kalkulator payout (`GET /campaigns/{id}/estimate`, rumus di `studio/catalog.estimate_payout`).
+- [x] Approve clip dari project ber-`rights = unknown` dijawab 409 `rights_unknown`. UI minta konfirmasi, atau rights bisa langsung diset dari banner di review queue.
+- [x] Project bisa dipasang ke campaign dari halaman detail project. Menghapus campaign hanya melepas link-nya, project tetap ada.
 
 **Selesai bila**: alur draft → approved bisa dipakai penuh dari UI; campaign bisa dipasang ke project.
 

@@ -13,6 +13,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 PROJECT_STATUSES = ("active", "archived")
 RIGHTS = ("unknown", "campaign", "permission", "cc", "own")
 REVIEW_STATUSES = ("draft", "approved", "rejected", "posted")
+# What a reviewer may set by hand; "posted" comes from recording a post (phase 3).
+REVIEWABLE_STATUSES = ("draft", "approved", "rejected")
+PLATFORMS = ("youtube", "tiktok", "instagram", "threads", "facebook", "x")
+PUBLISHERS = ("manual", "uploadpost")
+CAMPAIGN_STATUSES = ("active", "ended", "archived")
 
 
 def now_iso() -> str:
@@ -40,9 +45,12 @@ class Project(Base):
     rights_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String, default="active")
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    campaign_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[str] = mapped_column(String, default=now_iso)
     updated_at: Mapped[str] = mapped_column(String, default=now_iso)
 
+    campaign: Mapped["Campaign | None"] = relationship(lazy="joined")
     clips: Mapped[list["Clip"]] = relationship(
         back_populates="project", cascade="all, delete-orphan",
         order_by="Clip.clip_index", passive_deletes=True)
@@ -61,6 +69,7 @@ class Clip(Base):
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     hook_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hashtags: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
     review_status: Mapped[str] = mapped_column(String, default="draft")
     reviewed_at: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -83,3 +92,58 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
     value: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+def _json_dict(raw) -> dict:
+    try:
+        value = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+class Channel(Base):
+    """One of the user's own social accounts, with its posting defaults."""
+    __tablename__ = "channels"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String)
+    platform: Mapped[str] = mapped_column(String)
+    handle: Mapped[str | None] = mapped_column(String, nullable=True)
+    language: Mapped[str | None] = mapped_column(String, nullable=True)
+    caption_preset: Mapped[str | None] = mapped_column(Text, nullable=True)
+    watermark_text: Mapped[str | None] = mapped_column(String, nullable=True)
+    publisher: Mapped[str] = mapped_column(String, default="manual")
+    publisher_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=now_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=now_iso)
+    archived_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    @property
+    def preset(self) -> dict:
+        return _json_dict(self.caption_preset)
+
+    @property
+    def publisher_cfg(self) -> dict:
+        return _json_dict(self.publisher_config)
+
+
+class Campaign(Base):
+    """A clipping program that pays per view (CPM)."""
+    __tablename__ = "campaigns"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String)
+    platform_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    brief_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    cpm: Mapped[float] = mapped_column(Float, default=0)
+    currency: Mapped[str] = mapped_column(String, default="USD")
+    min_views: Mapped[int] = mapped_column(Integer, default=0)
+    max_payout: Mapped[float | None] = mapped_column(Float, nullable=True)
+    starts_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    ends_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    donation_pct: Mapped[float] = mapped_column(Float, default=0)
+    status: Mapped[str] = mapped_column(String, default="active")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=now_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=now_iso)
