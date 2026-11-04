@@ -8,6 +8,8 @@ services:
       - .:/app
       - /app/__pycache__
       - ./output:/app/output
+      # Studio: saved projects + studio.db (never swept by job cleanup)
+      - ./studio_data:/app/studio_data
     restart: unless-stopped
 
   frontend:

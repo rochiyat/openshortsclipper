@@ -2681,6 +2681,8 @@ async def lifespan(app: FastAPI):
     # Start worker and cleanup
     worker_task = asyncio.create_task(process_queue())
     cleanup_task = asyncio.create_task(cleanup_jobs())
+    if STUDIO_ENABLED:
+        _studio.startup()
     if BILLING_ENABLED:
         await cloud.setup_async(app, keep_reservation_ids=_resumed_reservation_ids)
         # Account erasure lives in cloud/, which can't import app.py; hand it the
@@ -2717,6 +2719,41 @@ app.include_router(_mcp_server.router)
 # captions only, never the GPU) and the title/description/tag generator.
 import free_tools as _free_tools
 app.include_router(_free_tools.router)
+
+# Studio (self-host only): saved projects in SQLite under STUDIO_DIR, outside
+# the job dirs cleanup_jobs() sweeps. Lives in studio/; this is its only hook.
+import studio as _studio
+STUDIO_ENABLED = not BILLING_ENABLED and _studio.enabled()
+
+
+def _studio_describe_job(job_id):
+    job = jobs.get(job_id) or _job_view_from_disk(job_id)
+    if not job:
+        return None
+    output_dir = job.get('output_dir') or os.path.join(OUTPUT_DIR, job_id)
+    source_video = None
+    for meta in glob.glob(os.path.join(glob.escape(output_dir), "*_metadata.json")):
+        try:
+            with open(meta) as f:
+                source_video = json.load(f).get('source_video') or None
+        except (OSError, ValueError):
+            pass
+        break
+    return {
+        'status': job.get('status'),
+        'output_dir': output_dir,
+        'result': job.get('result'),
+        'source_url': _job_source_url(job),
+        'source_video': source_video,
+    }
+
+
+if STUDIO_ENABLED:
+    _studio.setup(app, _studio.JobBridge(
+        output_dir=OUTPUT_DIR,
+        describe=_studio_describe_job,
+        recover=_recover_jobs_from_disk,
+    ))
 
 # Enable CORS for frontend. Cloud mode locks this down to the configured origins;
 # self-host keeps the permissive wildcard it has always used.
