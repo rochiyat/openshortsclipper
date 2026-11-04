@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Loader2, Film, FolderOpen, Download, ArrowLeft, Search, Archive, ArchiveRestore,
-  Trash2, Pencil, Check, X, Copy, ExternalLink,
+  Trash2, Pencil, Check, X, Copy, ExternalLink, TrendingUp,
 } from 'lucide-react';
 import {
   listProjects, getProject, updateProject, deleteProject, reopenProject,
@@ -298,8 +298,25 @@ function ClipCard({ clip }) {
   const dur = clip.duration ? `${Math.round(clip.duration)}s` : '';
   return (
     <div className="card overflow-hidden">
-      <div className="aspect-[9/16] bg-black">
+      <div className="relative aspect-[9/16] bg-black">
         <video src={src} controls preload="metadata" className="w-full h-full object-contain" />
+        {Number.isFinite(clip.predicted_score) && (
+          <span
+            className="absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full flex items-center gap-1"
+            title="openshorts' prediction of how well this clip will perform, from 0 to 100"
+          >
+            <TrendingUp size={11} className="shrink-0 text-muted" />
+            <span className="text-muted">viral</span>
+            <b className={
+              clip.predicted_score >= 80 ? 'text-ok'
+                : clip.predicted_score >= 65 ? 'text-brass'
+                  : 'text-ink2'
+            }>
+              {clip.predicted_score}
+            </b>
+            <span className="text-muted">/100</span>
+          </span>
+        )}
       </div>
       <div className="p-3">
         <div className="flex items-start justify-between gap-2 mb-1">
@@ -308,6 +325,9 @@ function ClipCard({ clip }) {
           </p>
           <span className="badge-brass shrink-0">{clip.review_status}</span>
         </div>
+        {clip.why && (
+          <p className="text-xs text-muted leading-snug break-words mb-1">{clip.why}</p>
+        )}
         <div className="flex items-center justify-between">
           <span className="readout">#{clip.clip_index + 1}{dur && ` · ${dur}`}</span>
           <a href={src} download={clip.file_name}
