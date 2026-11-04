@@ -2195,6 +2195,7 @@ _PERMANENT_MARKERS = (
     "prohibited_content", "blocked this video", "blocked its answer",
     "did not return usable clips", "clip detection failed", "short-form content",
     "sign in to confirm your age", "not available in your country",
+    "is not found or cannot be loaded",  # a missing CUDA DLL stays missing
 )
 
 

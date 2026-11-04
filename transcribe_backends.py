@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -157,6 +158,25 @@ _whisper_lock = threading.Lock()
 # Set after a CUDA failure (e.g. VRAM exhausted by other models on the GPU)
 # so every later transcription goes straight to CPU instead of re-failing.
 _whisper_force_cpu = False
+# A missing DLL says "cublas64_12.dll", with no "cuda" anywhere in the message.
+_CUDA_ERROR_MARKERS = ("cuda", "cublas", "cudnn")
+
+
+def _expose_cuda_dlls():
+    """Put the nvidia-cublas/cudnn wheels' DLLs on PATH (Windows only).
+
+    Those wheels install into site-packages, where CTranslate2's LoadLibrary
+    does not look. Job processes inherit this from their own call here.
+    """
+    if sys.platform != "win32":
+        return
+    site_packages = sysconfig.get_paths()["purelib"]
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    for lib in ("cublas", "cudnn"):
+        bin_dir = os.path.join(site_packages, "nvidia", lib, "bin")
+        if os.path.isdir(bin_dir) and bin_dir not in path:
+            path.insert(0, bin_dir)
+    os.environ["PATH"] = os.pathsep.join(path)
 
 
 def _get_whisper_model():
@@ -173,6 +193,7 @@ def _get_whisper_model():
     key = (cfg["model_size"], cfg["device"], cfg["compute_type"])
     with _whisper_lock:
         if _whisper_model is None or _whisper_key != key:
+            _expose_cuda_dlls()
             from faster_whisper import WhisperModel
             _whisper_model = WhisperModel(key[0], device=key[1], compute_type=key[2])
             _whisper_key = key
@@ -217,7 +238,8 @@ def run_whisper_transcription(media_path, **params):
     try:
         return _run_whisper_once(media_path, **params)
     except RuntimeError as e:
-        if _whisper_force_cpu or "cuda" not in str(e).lower():
+        message = str(e).lower()
+        if _whisper_force_cpu or not any(m in message for m in _CUDA_ERROR_MARKERS):
             raise
         print(f"⚠️ [ASR] whisper GPU failed ({e}) — retrying on CPU", flush=True)
         _whisper_force_cpu = True
