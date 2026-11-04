@@ -1,12 +1,16 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Loader2, Film, FolderOpen, Download, ArrowLeft, Search, Archive, ArchiveRestore,
-  Trash2, Pencil, Check, X, Copy, ExternalLink, TrendingUp,
+  Trash2, Pencil, Check, X, Copy, ExternalLink, TrendingUp, Calendar, FileText,
+  Scissors, Crosshair, Wand2, Type, Languages, Share2,
 } from 'lucide-react';
 import {
   listProjects, getProject, updateProject, deleteProject, reopenProject,
   mediaUrl, RIGHTS_OPTIONS, formatBytes, formatDate,
 } from './api';
+import { apiFetch } from '../lib/api';
+import { QUIET_BTN } from '../components/ResultCard';
+import Modal from '../components/ui/Modal';
 
 // Self-host project library (studio/). Saved projects live outside the job
 // dirs, so they outlast JOB_RETENTION_SECONDS; "reopen" copies one back into
@@ -130,6 +134,12 @@ function ProjectDetail({ id, onBack, onReopened }) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Best score first, ties in transcript order: same order as the Clip Generator.
+  const rankedClips = useMemo(() => {
+    const score = (c) => (Number.isFinite(c.predicted_score) ? c.predicted_score : -1);
+    return [...(project?.clips || [])].sort((a, b) => score(b) - score(a) || a.clip_index - b.clip_index);
+  }, [project]);
+
   const patch = async (body, label) => {
     setBusy(label);
     setError('');
@@ -153,6 +163,53 @@ function ProjectDetail({ id, onBack, onReopened }) {
       await onReopened?.(data);
     } catch (e) {
       setError(e?.detail || 'could not reopen this project.');
+      setBusy('');
+    }
+  };
+
+  // Every editor works on a live job, so a tool picked here reopens the project
+  // and lands in the Clip Generator with that tool open. Throws so the clip card
+  // can show the failure next to the button that was pressed.
+  const openTool = async (action) => {
+    setBusy('tool');
+    try {
+      const data = await reopenProject(id);
+      await onReopened?.(data, action);
+    } catch (e) {
+      setBusy('');
+      throw e;
+    }
+  };
+
+  const handleSchedule = async () => {
+    setError('');
+    try {
+      await openTool({ tool: 'schedule' });
+    } catch (e) {
+      setError(e?.detail || 'could not reopen this project.');
+    }
+  };
+
+  // The zip endpoint reads the job dir, which the retention sweep may have
+  // removed: reopen restores it without leaving this page.
+  const handleDownloadAll = async () => {
+    setBusy('zip');
+    setError('');
+    try {
+      await reopenProject(id);
+      const res = await apiFetch(`/api/jobs/${project.job_id}/download-all`);
+      if (!res.ok) throw new Error('zip failed');
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `openshorts_clips_${project.job_id.slice(0, 8)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e?.detail || 'could not download the clips.');
+    } finally {
       setBusy('');
     }
   };
@@ -247,10 +304,19 @@ function ProjectDetail({ id, onBack, onReopened }) {
         </div>
 
         <div className="flex flex-wrap gap-2 shrink-0">
-          <button onClick={handleReopen} disabled={!!busy} className="btn-primary px-3 py-2 text-xs"
+          <button onClick={handleReopen} disabled={!!busy} className="btn-ghost px-3 py-2 text-xs"
             title="Open this project in the Clip Generator to keep editing">
             {busy === 'reopen' ? <><Loader2 size={14} className="animate-spin" /> reopening…</> : <><FolderOpen size={14} /> reopen</>}
           </button>
+          <button onClick={handleDownloadAll} disabled={!!busy} className="btn-ghost px-3 py-2 text-xs"
+            title="Download all clips as a ZIP">
+            {busy === 'zip' ? <><Loader2 size={14} className="animate-spin" /> zipping…</> : <><Download size={14} /> download all</>}
+          </button>
+          {project.clip_count > 1 && (
+            <button onClick={handleSchedule} disabled={!!busy} className="btn-primary px-4 py-2 text-xs">
+              <Calendar size={14} /> schedule week
+            </button>
+          )}
           <button onClick={() => patch({ status: archived ? 'active' : 'archived' }, 'status')} disabled={!!busy}
             className="btn-ghost px-3 py-2 text-xs">
             {archived ? <><ArchiveRestore size={14} /> unarchive</> : <><Archive size={14} /> archive</>}
@@ -263,81 +329,189 @@ function ProjectDetail({ id, onBack, onReopened }) {
 
       {error && <p className="text-danger text-sm mb-4">{error}</p>}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-        {project.clips.map((c) => <ClipCard key={c.id} clip={c} />)}
+      <div className="grid gap-4 pb-10 grid-cols-[repeat(auto-fill,minmax(min(100%,600px),1fr))]">
+        {rankedClips.map((c) => <ClipCard key={c.id} clip={c} disabled={!!busy} onTool={openTool} />)}
       </div>
     </div>
   );
 }
 
-function CopyField({ label, value }) {
+function CopyButton({ label, value }) {
   const [copied, setCopied] = useState(false);
-  if (!value) return null;
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
+      setTimeout(() => setCopied(false), 2000);
     } catch { /* clipboard blocked: the text is still selectable */ }
   };
   return (
-    <div className="mt-2">
-      <div className="flex items-center justify-between">
-        <span className="readout">{label}</span>
-        <button onClick={copy} className="text-micro font-mono uppercase text-brass hover:text-ink flex items-center gap-1" title={`Copy ${label}`}>
-          {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'copied' : 'copy'}
-        </button>
-      </div>
-      <p className="text-xs text-ink whitespace-pre-wrap break-words line-clamp-4 select-text">{value}</p>
+    <button onClick={copy} aria-label={`copy ${label}`} className="p-1 rounded-full text-muted hover:text-brass transition-colors shrink-0">
+      {copied ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
+    </button>
+  );
+}
+
+function CopyRow({ label, value }) {
+  if (!value) return null;
+  return (
+    <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0 overflow-hidden">
+      <span className="eyebrow shrink-0">{label}</span>
+      <p className="text-xs text-ink2 truncate flex-1 min-w-0">{value}</p>
+      <CopyButton label={label} value={value} />
     </div>
   );
 }
 
-function ClipCard({ clip }) {
-  const src = mediaUrl(clip.video_url);
-  const dur = clip.duration ? `${Math.round(clip.duration)}s` : '';
+function CopyBlock({ label, value }) {
+  if (!value) return null;
   return (
-    <div className="card overflow-hidden">
-      <div className="relative aspect-[9/16] bg-black">
-        <video src={src} controls preload="metadata" className="w-full h-full object-contain" />
-        {Number.isFinite(clip.predicted_score) && (
-          <span
-            className="absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full flex items-center gap-1"
-            title="openshorts' prediction of how well this clip will perform, from 0 to 100"
-          >
-            <TrendingUp size={11} className="shrink-0 text-muted" />
-            <span className="text-muted">viral</span>
-            <b className={
-              clip.predicted_score >= 80 ? 'text-ok'
-                : clip.predicted_score >= 65 ? 'text-brass'
-                  : 'text-ink2'
-            }>
-              {clip.predicted_score}
-            </b>
-            <span className="text-muted">/100</span>
-          </span>
-        )}
+    <div>
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <span className="eyebrow">{label}</span>
+        <CopyButton label={label} value={value} />
       </div>
-      <div className="p-3">
-        <div className="flex items-start justify-between gap-2 mb-1">
-          <p className="text-sm text-ink font-medium line-clamp-2" title={clip.title || ''}>
-            {clip.title || `Clip ${clip.clip_index + 1}`}
-          </p>
-          <span className="badge-brass shrink-0">{clip.review_status}</span>
+      <p className="text-sm text-ink2 select-all break-words bg-paper rounded-input p-3 border border-rule whitespace-pre-wrap">{value}</p>
+    </div>
+  );
+}
+
+const CLIP_TOOLS = [
+  { tool: 'edit', label: 'edit clip', Icon: Scissors },
+  { tool: 'reframe', label: 'reframing', Icon: Crosshair },
+  { tool: 'auto', label: 'auto edit', Icon: Wand2 },
+  { tool: 'subtitles', label: 'subtitles', Icon: Type },
+  { tool: 'hook', label: 'edit hook', Icon: Wand2 },
+  { tool: 'dub', label: 'dub voice', Icon: Languages },
+];
+
+function formatClipDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  const s = Math.floor(seconds);
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// Same card as the Clip Generator's ResultCard, for a saved clip with no live
+// job behind it: the tool buttons go through onTool, which reopens the project.
+function ClipCard({ clip, disabled, onTool }) {
+  const [showDescriptions, setShowDescriptions] = useState(false);
+  const [resolution, setResolution] = useState(null);
+  const [pendingTool, setPendingTool] = useState(null);
+  const [toolError, setToolError] = useState('');
+  const src = mediaUrl(clip.video_url);
+  const number = clip.clip_index + 1;
+  const duration = formatClipDuration(clip.duration);
+
+  const runTool = async (tool) => {
+    setPendingTool(tool);
+    setToolError('');
+    try {
+      await onTool({ tool, index: clip.clip_index });
+    } catch (e) {
+      setToolError(e?.detail || 'could not reopen this project.');
+    } finally {
+      setPendingTool(null);
+    }
+  };
+
+  return (
+    <div className="card overflow-hidden flex flex-col md:flex-row group hover:border-rule2 transition-colors md:min-h-[420px]">
+      <div className="w-full max-w-[calc(64vh*0.5625)] md:max-w-none mx-auto md:mx-0 md:w-[236px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto">
+        <video
+          src={src}
+          controls
+          preload="metadata"
+          playsInline
+          className="w-full h-full object-contain"
+          onLoadedMetadata={(e) => {
+            if (e.target.videoWidth) setResolution(`${e.target.videoWidth}×${e.target.videoHeight}`);
+          }}
+        />
+        <div className="absolute top-3 left-3 flex gap-2">
+          <span className="bg-black/70 text-ink font-mono text-micro uppercase px-2 py-1 rounded-full">Clip {number}</span>
+          {Number.isFinite(clip.predicted_score) && (
+            <span
+              className="bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full flex items-center gap-1"
+              title="openshorts' prediction of how well this clip will perform, from 0 to 100"
+            >
+              <TrendingUp size={11} className="shrink-0 text-muted" />
+              <span className="text-muted">viral</span>
+              <b className={
+                clip.predicted_score >= 80 ? 'text-ok'
+                  : clip.predicted_score >= 65 ? 'text-brass'
+                    : 'text-ink2'
+              }>
+                {clip.predicted_score}
+              </b>
+              <span className="text-muted">/100</span>
+            </span>
+          )}
         </div>
-        {clip.why && (
-          <p className="text-xs text-muted leading-snug break-words mb-1">{clip.why}</p>
-        )}
-        <div className="flex items-center justify-between">
-          <span className="readout">#{clip.clip_index + 1}{dur && ` · ${dur}`}</span>
-          <a href={src} download={clip.file_name}
-            className="text-micro font-mono uppercase text-brass hover:text-ink flex items-center gap-1 transition-colors" title="Download">
-            <Download size={14} /> Download
+      </div>
+
+      <div className="flex-1 p-4 md:p-5 flex flex-col overflow-hidden min-w-0">
+        <div className="mb-4">
+          <h3 className="text-base font-medium text-ink leading-tight line-clamp-2 mb-2 break-words" title={clip.title || ''}>
+            {clip.title || `Clip ${number}`}
+          </h3>
+          {clip.why && <p className="text-xs text-muted leading-snug break-words mb-2">{clip.why}</p>}
+          <div className="flex flex-wrap gap-1.5">
+            {duration && <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0">{duration}</span>}
+            {resolution && <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0">{resolution}</span>}
+            <span className="readout bg-paper3 px-2 py-0.5 rounded-full shrink-0">{clip.review_status}</span>
+          </div>
+        </div>
+
+        <div className="flex-1 min-h-0 space-y-2 mb-4">
+          <CopyRow label="YOUTUBE" value={clip.title} />
+          <CopyRow label="TIKTOK · IG" value={clip.caption} />
+          <button
+            onClick={() => setShowDescriptions(true)}
+            className="w-full flex items-center justify-center gap-2 py-2 rounded-input border border-dashed border-rule text-xs lowercase text-muted hover:text-brass hover:border-rule2 transition-colors"
+          >
+            <FileText size={14} /> view descriptions
+          </button>
+        </div>
+
+        {toolError && <p className="mb-3 text-xs text-danger break-words">{toolError}</p>}
+
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(104px,1fr))] gap-2 mt-auto pt-4 border-t border-rule">
+          {CLIP_TOOLS.map((t) => (
+            <button key={t.tool} onClick={() => runTool(t.tool)} disabled={disabled} className={QUIET_BTN} title="Reopens this project to edit it">
+              {pendingTool === t.tool
+                ? <Loader2 size={16} className="animate-spin text-brass shrink-0" />
+                : <t.Icon size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+              {t.label}
+            </button>
+          ))}
+          <button
+            onClick={() => runTool('post')}
+            disabled={disabled}
+            className="btn-primary flex-col gap-1 py-2.5 sm:py-2 px-1 text-[11px] leading-none rounded-input whitespace-nowrap"
+            title="Reopens this project to post it"
+          >
+            {pendingTool === 'post' ? <Loader2 size={16} className="animate-spin shrink-0" /> : <Share2 size={16} className="shrink-0" />} post
+          </button>
+          <a href={src} download={clip.file_name} className={`${QUIET_BTN} col-span-2`}>
+            <Download size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
+            download
           </a>
         </div>
-        <CopyField label="hook" value={clip.hook_text} />
-        <CopyField label="caption" value={clip.caption} />
       </div>
+
+      <Modal
+        isOpen={showDescriptions}
+        onClose={() => setShowDescriptions(false)}
+        eyebrow="GENERATED COPY"
+        title="descriptions"
+        size="md"
+      >
+        <div className="space-y-4">
+          <CopyBlock label="YOUTUBE TITLE" value={clip.title} />
+          <CopyBlock label="TIKTOK · IG CAPTION" value={clip.caption} />
+          <CopyBlock label="HOOK" value={clip.hook_text} />
+        </div>
+      </Modal>
     </div>
   );
 }

@@ -13,7 +13,7 @@ import TikTokDraftNotice from './TikTokDraftNotice';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
-const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2.5 sm:py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
+export const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2.5 sm:py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
 // Follow an async post (request_id from /api/social/post) for about a minute.
 // Returns {done, failed}: done once every platform finished, failed lists
@@ -63,7 +63,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, onUpgrade = null }) {
+export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, onUpgrade = null, autoAction = null, onAutoActionDone = null }) {
     const [showModal, setShowModal] = useState(false);
     // The "why" line is clamped to two lines so cards in a row stay level;
     // when it overflows, a hover (desktop) or tap (touch) shows the whole
@@ -690,8 +690,25 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         }
     };
 
+    // A tool picked on a saved project's card (Projects tab): the project was
+    // just reopened, so run the same action its button here would. The ref keeps
+    // a re-run effect from starting a paid auto edit twice.
+    const autoActionRan = useRef(false);
+    useEffect(() => {
+        if (!autoAction || autoActionRan.current) return;
+        autoActionRan.current = true;
+        videoRef.current?.scrollIntoView({ block: 'center' });
+        if (autoAction === 'auto') handleAutoEdit();
+        else if (autoAction === 'subtitles') setShowSubtitleModal(true);
+        else if (autoAction === 'hook') setShowHookModal(true);
+        else if (autoAction === 'dub') setShowTranslateModal(true);
+        else if (autoAction === 'post') setShowModal(true);
+        onAutoActionDone?.();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autoAction]);
+
     // Managed (cloud plan/trial) users post with the server-side key — no BYOK needed
-    const canPost = isManaged || (uploadPostKey && uploadUserId);
+    const canPost =isManaged || (uploadPostKey && uploadUserId);
 
     const handlePost = async () => {
         if (!canPost) {
