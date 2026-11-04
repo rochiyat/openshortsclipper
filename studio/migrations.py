@@ -96,6 +96,52 @@ MIGRATIONS = [
         "CREATE INDEX ix_projects_campaign ON projects(campaign_id)",
         "CREATE INDEX ix_campaigns_status ON campaigns(status)",
     ]),
+    (3, [
+        # Posts outlive their clip (payout history): clip_id is SET NULL when a
+        # project is deleted, never cascaded.
+        """
+        CREATE TABLE posts (
+            id                       TEXT PRIMARY KEY,
+            clip_id                  TEXT REFERENCES clips(id) ON DELETE SET NULL,
+            channel_id               TEXT NOT NULL REFERENCES channels(id),
+            campaign_id              TEXT REFERENCES campaigns(id) ON DELETE SET NULL,
+            platform                 TEXT NOT NULL,
+            external_id              TEXT NOT NULL,
+            url                      TEXT NOT NULL,
+            posted_at                TEXT NOT NULL,
+            method                   TEXT NOT NULL DEFAULT 'manual',
+            publish_request_id       TEXT,
+            status                   TEXT NOT NULL DEFAULT 'live',
+            submitted_to_campaign_at TEXT,
+            claim_status             TEXT NOT NULL DEFAULT 'none',
+            notes                    TEXT,
+            file_sha256              TEXT,
+            last_checked_at          TEXT,
+            last_error               TEXT,
+            created_at               TEXT NOT NULL,
+            updated_at               TEXT NOT NULL,
+            UNIQUE (platform, external_id)
+        )
+        """,
+        """
+        CREATE TABLE view_snapshots (
+            id               TEXT PRIMARY KEY,
+            post_id          TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            captured_at      TEXT NOT NULL,
+            views            INTEGER NOT NULL,
+            likes            INTEGER,
+            comments         INTEGER,
+            shares           INTEGER,
+            source           TEXT NOT NULL,
+            UNIQUE (post_id, captured_at)
+        )
+        """,
+        "CREATE INDEX ix_posts_channel ON posts(channel_id, posted_at)",
+        "CREATE INDEX ix_posts_campaign ON posts(campaign_id)",
+        "CREATE INDEX ix_posts_clip ON posts(clip_id)",
+        "CREATE INDEX ix_posts_sha ON posts(file_sha256, channel_id)",
+        "CREATE INDEX ix_snapshots_post ON view_snapshots(post_id, captured_at DESC)",
+    ]),
 ]
 
 LATEST = MIGRATIONS[-1][0]

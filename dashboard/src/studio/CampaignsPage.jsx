@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { Loader2, Plus, Pencil, Trash2, ExternalLink, Megaphone } from 'lucide-react';
 import Modal from '../components/ui/Modal';
 import {
-  listCampaigns, createCampaign, updateCampaign, deleteCampaign, estimatePayout, formatMoney, formatDate,
+  listCampaigns, createCampaign, updateCampaign, deleteCampaign, estimatePayout, campaignReport,
+  formatMoney, formatDate, formatCount,
 } from './api';
 
 const EMPTY = {
@@ -99,6 +100,7 @@ export default function CampaignsPage() {
                 <ExternalLink size={12} /> brief
               </a>
             )}
+            <CampaignTotals campaign={c} />
             <PayoutCalculator campaign={c} />
             <div className="flex gap-2 mt-3">
               <button onClick={() => setEditing(c)} className="btn-ghost px-3 py-2 text-xs"><Pencil size={14} /> edit</button>
@@ -115,6 +117,33 @@ export default function CampaignsPage() {
           onSaved={() => { setEditing(null); load(); }}
         />
       )}
+    </div>
+  );
+}
+
+// Real numbers from recorded posts and their latest view snapshots.
+function CampaignTotals({ campaign }) {
+  const [report, setReport] = useState(null);
+  useEffect(() => {
+    campaignReport(campaign.id).then(setReport).catch(() => setReport(null));
+  }, [campaign]);
+  if (!report || report.posts.length === 0) return null;
+  const t = report.totals;
+  const claimable = report.posts.filter((p) => p.eligible_views > 0).length;
+  return (
+    <div className="mt-3 pt-3 border-t border-rule grid grid-cols-3 gap-2">
+      <div>
+        <p className="text-sm text-ink font-medium tabular-nums">{formatCount(t.views)}</p>
+        <p className="readout">views · {report.posts.length} post{report.posts.length === 1 ? '' : 's'}</p>
+      </div>
+      <div>
+        <p className="text-sm text-ink font-medium tabular-nums">{formatMoney(t.payout, report.currency)}</p>
+        <p className="readout">est. payout · {claimable} claimable</p>
+      </div>
+      <div>
+        <p className="text-sm text-ink font-medium tabular-nums">{formatMoney(t.donation, report.currency)}</p>
+        <p className="readout">donation</p>
+      </div>
     </div>
   );
 }

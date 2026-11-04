@@ -116,3 +116,26 @@ export const formatMoney = (amount, currency = 'USD') => {
     return `${currency} ${(amount || 0).toFixed(2)}`;
   }
 };
+
+// ---- posts & views ----
+export const listPosts = ({ channelId = '', campaignId = '', status = '', platform = '' } = {}) => {
+  const params = new URLSearchParams({
+    channel_id: channelId, campaign_id: campaignId, status, platform, limit: '1000',
+  });
+  return apiJson(`/api/studio/posts?${params}`);
+};
+export const createPost = (body) => apiJson('/api/studio/posts', { method: 'POST', ...json(body) });
+export const updatePost = (id, patch) => apiJson(`/api/studio/posts/${id}`, { method: 'PATCH', ...json(patch) });
+export const deletePost = (id) => apiJson(`/api/studio/posts/${id}`, { method: 'DELETE' });
+export const refreshPost = (id) => apiJson(`/api/studio/posts/${id}/refresh`, { method: 'POST' });
+export const postSnapshots = (id) => apiJson(`/api/studio/posts/${id}/snapshots`);
+export const addSnapshot = (id, body) =>
+  apiJson(`/api/studio/posts/${id}/snapshots`, { method: 'POST', ...json(body) });
+export const snapshotStatus = () => apiJson('/api/studio/snapshots/status');
+export const runSnapshots = () => apiJson('/api/studio/snapshots/run', { method: 'POST' });
+export const campaignReport = (id) => apiJson(`/api/studio/campaigns/${id}/report`);
+export const exportPostsUrl = () => getApiUrl('/api/studio/export/posts.csv');
+
+export const CLAIM_STATUSES = ['none', 'submitted', 'approved', 'paid', 'rejected'];
+
+export const formatCount = (n) => (n == null ? '—' : Number(n).toLocaleString());

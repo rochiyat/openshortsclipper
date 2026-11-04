@@ -3,12 +3,12 @@ import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from . import catalog, db, projects, review, storage
-from .models import Clip, Project
+from . import catalog, db, posts, projects, review, scheduler, storage
+from .models import Clip, Post, Project
 from .projects import JobBridge, StudioError
 
 router = APIRouter(prefix="/api/studio", tags=["studio"])
@@ -338,3 +338,155 @@ def estimate(campaign_id: str, views: int = Query(..., ge=0), s: Session = Depen
     except StudioError as e:
         _raise(e)
     return catalog.estimate_payout(views, c)
+
+
+# ---- posts & views --------------------------------------------------------------
+
+class CreatePostRequest(BaseModel):
+    clip_id: str
+    channel_id: str
+    url: str
+    posted_at: Optional[str] = None
+    campaign_id: Optional[str] = None
+    notes: Optional[str] = None
+    force: bool = False
+
+
+class UpdatePostRequest(BaseModel):
+    status: Optional[str] = None
+    claim_status: Optional[str] = None
+    submitted_to_campaign_at: Optional[str] = None
+    posted_at: Optional[str] = None
+    campaign_id: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ManualSnapshotRequest(BaseModel):
+    views: int
+    likes: Optional[int] = None
+    comments: Optional[int] = None
+    shares: Optional[int] = None
+    captured_at: Optional[str] = None
+
+
+def _post_out(p: Post, snaps=None) -> dict:
+    summary = posts.summarize(snaps or [])
+    est = (catalog.estimate_payout(summary["views"] or 0, p.campaign)
+           if p.campaign and summary["views"] is not None else None)
+    return {
+        "id": p.id, "url": p.url, "platform": p.platform, "external_id": p.external_id,
+        "posted_at": p.posted_at, "method": p.method, "status": p.status,
+        "claim_status": p.claim_status, "submitted_to_campaign_at": p.submitted_to_campaign_at,
+        "notes": p.notes, "last_checked_at": p.last_checked_at, "last_error": p.last_error,
+        "channel": {"id": p.channel.id, "name": p.channel.name, "handle": p.channel.handle}
+        if p.channel else None,
+        "campaign": {"id": p.campaign.id, "name": p.campaign.name} if p.campaign else None,
+        "clip": {"id": p.clip.id, "title": p.clip.title, "project_id": p.clip.project_id,
+                 "video_url": _media_url(p.clip.project_id, p.clip.file_name)} if p.clip else None,
+        "stats": summary,
+        "estimate": est,
+        "created_at": p.created_at,
+    }
+
+
+@router.post("/posts")
+def create_post(req: CreatePostRequest, s: Session = Depends(db.get_session)):
+    try:
+        p = posts.create_post(s, _sent(req, exclude=("force",)), force=req.force)
+    except StudioError as e:
+        _raise(e)
+    return {"post": _post_out(p)}
+
+
+@router.get("/posts")
+def list_posts(channel_id: str = "", platform: str = "", campaign_id: str = "", status: str = "",
+               limit: int = Query(200, ge=1, le=1000), offset: int = Query(0, ge=0),
+               s: Session = Depends(db.get_session)):
+    rows, total = posts.list_posts(s, channel_id=channel_id, platform=platform,
+                                   campaign_id=campaign_id, status=status,
+                                   limit=limit, offset=offset)
+    snaps = posts.snapshots_for(s, [p.id for p in rows])
+    return {"posts": [_post_out(p, snaps[p.id]) for p in rows], "total": total}
+
+
+@router.patch("/posts/{post_id}")
+def update_post(post_id: str, req: UpdatePostRequest, s: Session = Depends(db.get_session)):
+    try:
+        p = posts.update_post(s, posts.get_post(s, post_id), _sent(req))
+    except StudioError as e:
+        _raise(e)
+    return {"post": _post_out(p, posts.snapshots_for(s, [p.id])[p.id])}
+
+
+@router.delete("/posts/{post_id}")
+def delete_post(post_id: str, s: Session = Depends(db.get_session)):
+    try:
+        posts.delete_post(s, posts.get_post(s, post_id))
+    except StudioError as e:
+        _raise(e)
+    return {"deleted": post_id}
+
+
+@router.get("/posts/{post_id}/snapshots")
+def post_snapshots(post_id: str, s: Session = Depends(db.get_session)):
+    try:
+        p = posts.get_post(s, post_id)
+    except StudioError as e:
+        _raise(e)
+    snaps = posts.snapshots_for(s, [p.id])[p.id]
+    return {"post_id": p.id, "snapshots": [
+        {"captured_at": x.captured_at, "views": x.views, "likes": x.likes,
+         "comments": x.comments, "shares": x.shares, "source": x.source} for x in snaps]}
+
+
+@router.post("/posts/{post_id}/snapshots")
+def add_manual_snapshot(post_id: str, req: ManualSnapshotRequest, s: Session = Depends(db.get_session)):
+    """Type the numbers in by hand when a platform cannot be read."""
+    try:
+        p = posts.get_post(s, post_id)
+        posts.manual_snapshot(s, p, _sent(req))
+    except StudioError as e:
+        _raise(e)
+    return {"post": _post_out(p, posts.snapshots_for(s, [p.id])[p.id])}
+
+
+@router.post("/posts/{post_id}/refresh")
+def refresh_post(post_id: str, s: Session = Depends(db.get_session)):
+    """Read this post's counters now (blocking, one fetch)."""
+    try:
+        p = posts.get_post(s, post_id)
+    except StudioError as e:
+        _raise(e)
+    s.commit()
+    summary = scheduler.run_once([p.id])
+    if summary is None:
+        raise HTTPException(status_code=409, detail="A snapshot run is already in progress")
+    s.expire_all()
+    p = posts.get_post(s, post_id)
+    return {"post": _post_out(p, posts.snapshots_for(s, [p.id])[p.id]), "summary": summary}
+
+
+@router.get("/snapshots/status")
+def snapshots_status():
+    return scheduler.status()
+
+
+@router.post("/snapshots/run", status_code=202)
+def snapshots_run():
+    started = scheduler.trigger_background()
+    return {"started": started, **scheduler.status()}
+
+
+@router.get("/campaigns/{campaign_id}/report")
+def campaign_report(campaign_id: str, s: Session = Depends(db.get_session)):
+    try:
+        c = catalog.get_campaign(s, campaign_id)
+    except StudioError as e:
+        _raise(e)
+    return posts.campaign_report(s, c)
+
+
+@router.get("/export/posts.csv")
+def export_posts_csv(s: Session = Depends(db.get_session)):
+    return Response(posts.export_csv(s), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="studio-posts.csv"'})

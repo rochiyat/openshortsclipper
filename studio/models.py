@@ -18,6 +18,9 @@ REVIEWABLE_STATUSES = ("draft", "approved", "rejected")
 PLATFORMS = ("youtube", "tiktok", "instagram", "threads", "facebook", "x")
 PUBLISHERS = ("manual", "uploadpost")
 CAMPAIGN_STATUSES = ("active", "ended", "archived")
+POST_STATUSES = ("live", "removed", "failed", "pending")
+CLAIM_STATUSES = ("none", "submitted", "approved", "paid", "rejected")
+SNAPSHOT_SOURCES = ("youtube_api", "ytdlp", "manual", "uploadpost")
 
 
 def now_iso() -> str:
@@ -147,3 +150,47 @@ class Campaign(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, default=now_iso)
     updated_at: Mapped[str] = mapped_column(String, default=now_iso)
+
+
+class Post(Base):
+    """A clip published on one of the user's channels."""
+    __tablename__ = "posts"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    clip_id: Mapped[str | None] = mapped_column(
+        ForeignKey("clips.id", ondelete="SET NULL"), nullable=True)
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id"))
+    campaign_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    platform: Mapped[str] = mapped_column(String)
+    external_id: Mapped[str] = mapped_column(String)
+    url: Mapped[str] = mapped_column(String)
+    posted_at: Mapped[str] = mapped_column(String)
+    method: Mapped[str] = mapped_column(String, default="manual")
+    publish_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="live")
+    submitted_to_campaign_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    claim_status: Mapped[str] = mapped_column(String, default="none")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_checked_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=now_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=now_iso)
+
+    clip: Mapped["Clip | None"] = relationship(lazy="joined")
+    channel: Mapped[Channel] = relationship(lazy="joined")
+    campaign: Mapped["Campaign | None"] = relationship(lazy="joined")
+
+
+class ViewSnapshot(Base):
+    __tablename__ = "view_snapshots"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    post_id: Mapped[str] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"))
+    captured_at: Mapped[str] = mapped_column(String, default=now_iso)
+    views: Mapped[int] = mapped_column(Integer)
+    likes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    shares: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String)

@@ -7,7 +7,14 @@ from .config import enabled
 from .db import init
 from .projects import JobBridge
 
-__all__ = ["enabled", "init", "setup", "JobBridge"]
+__all__ = ["enabled", "init", "setup", "startup", "JobBridge"]
+
+
+def startup():
+    """Lifespan hook: open/migrate the database, start the daily view snapshots."""
+    from . import scheduler
+    init()
+    scheduler.start()
 
 
 def setup(app, bridge: JobBridge):

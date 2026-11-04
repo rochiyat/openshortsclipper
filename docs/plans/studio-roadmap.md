@@ -1,6 +1,6 @@
 # Studio: rencana fitur project, posting & views (self-host)
 
-Status: Fase 0–2 selesai · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
+Status: Fase 0–3 selesai (Fase 3: YouTube diprioritaskan) · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
 
 ## 1. Tujuan
 
@@ -87,6 +87,11 @@ tests/
 | `STUDIO_ENABLED` | `1` | Matikan Studio di self-host dengan `0` (di Cloud selalu mati) |
 | `STUDIO_DIR` | `studio_data` | Lokasi `studio.db` dan `projects/` |
 | `STUDIO_LINK_MODE` | `link` | `link` = hardlink file media bila satu filesystem (hemat disk), `copy` = selalu salin |
+| `YOUTUBE_DATA_API_KEY` | kosong | API key YouTube Data API v3. Bila diisi, views YouTube dibaca lewat `videos.list` (50 video per panggilan, 1 unit kuota). Bila kosong, pakai yt-dlp |
+| `STUDIO_SNAPSHOTS` | `1` | `0` mematikan pembacaan views harian otomatis (refresh manual tetap bisa) |
+| `STUDIO_SNAPSHOT_AT` | `23:50` | Jam pembacaan harian (HH:MM) |
+| `STUDIO_TZ` | `Asia/Jakarta` | Zona waktu jadwal; nama IANA atau offset seperti `+07:00`. Tanpa tzdata jatuh ke UTC+7 |
+| `STUDIO_TRACK_DAYS` | `90` | Post lebih tua dari ini tidak dibaca lagi otomatis |
 
 Hardlink hanya jalan bila `studio_data/` dan `output/` ada di mount yang sama. Linux menolak hardlink antar mount point (EXDEV), termasuk dua bind mount dari disk yang sama. Di `docker-compose.yml` bawaan keduanya mount terpisah, jadi Studio otomatis **menyalin** file. Hasilnya tetap benar, hanya pakai disk dua kali selama job asli belum dihapus cleanup.
 
@@ -236,17 +241,18 @@ Estimasi untuk 1 developer, sudah termasuk test.
 
 **Selesai bila**: alur draft → approved bisa dipakai penuh dari UI; campaign bisa dipasang ke project.
 
-### Fase 3 — Postingan manual + snapshot views harian (3–4 hari)
+### Fase 3 — Postingan manual + snapshot views harian (3–4 hari) ✅
 
-- [ ] Model `posts`, `view_snapshots`.
-- [ ] `services/posts.parse_url()`: deteksi platform + `external_id` dari URL YouTube Shorts, TikTok, Instagram Reels, Threads, Facebook (allowlist host, sama ketatnya dengan pola `noplaylist` + allowlist di downloader).
-- [ ] Form **Tandai sudah diposting**: pilih clip + channel, tempel URL → status clip jadi `posted`.
-- [ ] Deteksi duplikat: tolak/peringatkan bila `file_sha256` yang sama sudah ada di `posts` untuk channel yang sama.
-- [ ] `metrics/ytdlp.py`: ambil `view_count`, `like_count`, `comment_count` via yt-dlp (`skip_download`, `ssrf_guard.guarded()`, cookies opsional). Fetcher Upload-Post untuk post yang dipublish lewat Upload-Post.
-- [ ] `scheduler.py`: loop asyncio di lifespan, jalan sekali sehari pada `SNAPSHOT_AT` (default `23:50`) zona `STUDIO_TZ` (default `Asia/Jakarta`), jitter antar request, retry dengan backoff, catat error per post. Snapshot terlewat (container mati) dijalankan saat start.
-- [ ] Input views manual sebagai fallback (`source = manual`) untuk platform yang gagal di-fetch.
-- [ ] Halaman **Posts**: tabel (channel, platform, tanggal, views terakhir, Δ 24 jam, status klaim) + grafik views per post.
-- [ ] Laporan campaign: total views, estimasi payout, donasi, export CSV.
+- [x] Migrasi 3: tabel `posts` (UNIQUE `platform, external_id`; `clip_id` SET NULL supaya riwayat payout tetap ada walau project dihapus) dan `view_snapshots`.
+- [x] `studio/urls.py`: platform + `external_id` + URL kanonik untuk YouTube (shorts/watch/youtu.be/live), TikTok, Instagram, Threads, Facebook, X. Allowlist host; short link (`vm.tiktok.com`, `fb.watch`) ditolak, tidak di-follow.
+- [x] **Record post** (dari review queue atau halaman Posts): pilih clip + channel, tempel URL. Clip jadi `posted`, campaign ikut project. URL yang sama ditolak (409); clip belum approved atau file yang sama di channel yang sama minta konfirmasi. Platform URL harus sama dengan platform channel. Hapus post → clip kembali `approved`.
+- [x] `studio/metrics.py`: **YouTube Data API** (`YOUTUBE_DATA_API_KEY`, batch 50) sebagai sumber utama YouTube, yt-dlp sebagai cadangan dan untuk platform lain. Semua di `ssrf_guard.guarded()`, tanpa `PROXY_URL`, cookies dulu lalu anonim. Halaman tanpa view count = error, **tidak pernah dicatat sebagai 0**. Video hilang/privat → post `removed` dan berhenti dibaca.
+- [x] `studio/scheduler.py`: sekali sehari jam `STUDIO_SNAPSHOT_AT` zona `STUDIO_TZ`, jeda acak 1,5–4 detik antar halaman yt-dlp, satu post gagal tidak menghentikan batch, run yang terlewat dijalankan saat start. `POST /snapshots/run` (background) dan `POST /posts/{id}/refresh`.
+- [x] Input views manual (`source = manual`) bila platform tidak bisa dibaca.
+- [x] Halaman **Posts**: filter channel/campaign/status, views terakhir, Δ 24 jam, estimasi payout, status klaim, grafik views per post (hover), refresh, hapus.
+- [x] Laporan campaign (`GET /campaigns/{id}/report`): total views, payout, donasi di kartu campaign; export CSV (`GET /export/posts.csv`).
+- [ ] Fetcher Upload-Post untuk post yang dipublish lewat Upload-Post → dipindah ke Fase 4 (baru relevan setelah publish otomatis ada).
+- [ ] Verifikasi dengan URL nyata (dua malam berturut-turut) → perlu dijalankan di server kamu; sandbox pengembangan tidak bisa menjangkau YouTube.
 
 **Selesai bila**: 3 URL nyata (YouTube, TikTok, Instagram) tercatat, snapshot otomatis masuk dua malam berturut-turut, grafik dan CSV benar.
 

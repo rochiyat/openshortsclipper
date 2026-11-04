@@ -10,10 +10,12 @@ import {
 import ReviewQueue from './ReviewQueue';
 import CampaignsPage from './CampaignsPage';
 import ChannelsPage from './ChannelsPage';
+import PostsPage from './PostsPage';
 
 const SECTIONS = [
   { id: 'projects', label: 'projects' },
   { id: 'review', label: 'review' },
+  { id: 'posts', label: 'posts' },
   { id: 'campaigns', label: 'campaigns' },
   { id: 'channels', label: 'channels' },
 ];
@@ -67,6 +69,7 @@ export default function StudioTab({ onReopened }) {
       {section === 'review' && (
         <ReviewQueue key={reviewProject} initialProjectId={reviewProject} onCountsChange={setCounts} />
       )}
+      {section === 'posts' && <PostsPage />}
       {section === 'campaigns' && <CampaignsPage />}
       {section === 'channels' && <ChannelsPage />}
     </div>
