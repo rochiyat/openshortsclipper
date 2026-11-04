@@ -24,6 +24,22 @@ Two invariants keep that chain from leaking:
 `target_clips` on `/api/process` (dashboard: advanced options) pins both ends via
 `CLIP_TARGET_MIN` / `CLIP_TARGET_MAX` when the user wants an exact number.
 
+## Where a clip ends (`clip_selection.end_on_sentence`)
+
+The word snap alone only finds the nearest word, so clips kept stopping
+mid-sentence. Three layers now handle the end of a clip:
+
+- The detail pass receives each window's `sentence_ends`, so the model picks an
+  end instead of estimating one from the text.
+- `end_on_sentence` moves the end to a sentence end: one within 1.5 s, then the
+  next within 8 s, then the previous within 15 s, always inside the min/max band.
+  A pause of 0.7 s counts as a sentence end, for transcripts with few marks.
+- `ffmpeg_utils.cut_clip` fades the last 0.25 s of audio.
+
+A clip can still end mid-sentence when no sentence end fits the band; raising
+`clip_max_seconds` gives it room. `end_on_sentence` is pipeline only: a recut keeps
+the bounds the user set (`recut.snap_segments` stays on the word snap).
+
 ## Silent footage: the vision fallback (`main.get_visual_clips`)
 
 `transcribe_video` raising `NoAudioError`, **or** `speech_is_sparse()` returning

@@ -363,3 +363,67 @@ def snap_clip_to_words(start, end, words, video_duration,
     if new_end <= new_start or new_end - new_start < min_duration:
         return original
     return (round(new_start, 3), round(new_end, 3))
+
+
+# What closes a sentence once closing quotes and brackets are stripped. Whisper
+# keeps the punctuation on the word; Latin, CJK, Arabic and Devanagari marks.
+SENTENCE_MARKS = (".", "?", "!", "…", "。", "？", "！", "؟", "।")
+CLOSING_CHARS = "\"'”’»)]}"
+# A pause this long closes a thought even when the transcript has no mark:
+# some sources come back with one sentence mark every 16 words.
+SENTENCE_PAUSE_SECONDS = 0.7
+
+
+def sentence_end_times(words):
+    """The seconds where a sentence or a thought finishes, sorted.
+
+    words: [{'w','s','e'}, ...] sorted by start.
+    """
+    times = []
+    for i, word in enumerate(words):
+        end = float(word.get("e", 0))
+        text = str(word.get("w", "")).strip().rstrip(CLOSING_CHARS)
+        following = float(words[i + 1].get("s", 0)) if i + 1 < len(words) else None
+        if (text.endswith(SENTENCE_MARKS) or following is None
+                or following - end >= SENTENCE_PAUSE_SECONDS):
+            times.append(end)
+    return sorted(times)
+
+
+def end_on_sentence(start, end, words, video_duration,
+                    min_duration=15.0, max_duration=60.0,
+                    near=1.5, max_extend=8.0, max_trim=15.0, max_tail=0.45):
+    """
+    Move a clip's end onto the end of a sentence. snap_clip_to_words only finds
+    the nearest word, and 40 of 41 clips measured on five talks stopped
+    mid-sentence with the next word starting right at the cut.
+
+    Order: a sentence end within ``near`` (the model almost hit it), then the
+    next one within ``max_extend``, then the previous one within ``max_trim``.
+    Pipeline only: a recut keeps the bounds the user dragged. Returns the end
+    unchanged when no word ends nearby (it sits in silence, nothing is cut) or
+    no sentence end fits the duration band.
+    """
+    end = float(end)
+    if not any(abs(float(w.get("e", 0)) - end) <= near for w in words):
+        return end
+
+    latest = min(float(video_duration), float(start) + max_duration)
+    fitting = [t for t in sentence_end_times(words)
+               if min_duration <= t - float(start) and t <= latest]
+    close = [t for t in fitting if abs(t - end) <= near]
+    later = [t for t in fitting if end < t <= end + max_extend]
+    earlier = [t for t in fitting if end - max_trim <= t < end]
+    if close:
+        chosen = min(close, key=lambda t: abs(t - end))
+    elif later:
+        chosen = later[0]
+    elif earlier:
+        chosen = earlier[-1]
+    else:
+        return end
+
+    # Trail into the silence after the sentence, as the word snap does.
+    next_starts = [float(w.get("s", 0)) for w in words if float(w.get("s", 0)) >= chosen]
+    tail = min(max_tail, (min(next_starts) - chosen) / 2) if next_starts else max_tail
+    return round(min(chosen + tail, latest), 3)

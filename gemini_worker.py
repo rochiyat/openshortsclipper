@@ -301,6 +301,8 @@ CLIP RULES:
   2 seconds would not stop a cold viewer from scrolling, move the start or skip the clip.
 - Start slightly before the hook and end slightly after the payoff when possible.
 - Do not cut in the middle of a word or phrase.
+- Each window lists `sentence_ends`, the seconds where a sentence or thought finishes.
+  Set `end` to the one that completes the payoff. Never estimate an end from the text.
 - No generic intros/outros unless they are the hook.
 - STANDS ALONE: the clip must make sense to someone who has seen nothing else.
   If it opens on a pronoun, a "that", a "so anyway", or an answer whose question

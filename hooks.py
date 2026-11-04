@@ -678,6 +678,9 @@ def _write_recipe(output_path, video_path, img_path, x, y, duration):
     if os.path.dirname(os.path.abspath(video_path)) != os.path.abspath(output_dir):
         raise ValueError("the hook's source must be next to its output")
     json_path, png_path = recipe_paths(output_dir, os.path.basename(output_path))
+    if sys.platform == "win32":
+        png_path = "\\\\?\\" + os.path.abspath(png_path)
+        json_path = "\\\\?\\" + os.path.abspath(json_path)
     shutil.copyfile(img_path, png_path)
     with open(json_path, "w") as f:
         json.dump({"source": os.path.basename(video_path), "x": x, "y": y,

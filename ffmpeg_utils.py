@@ -305,6 +305,7 @@ MIN_CUT_BYTES = 1024
 # trade. Waiting is the whole mechanism — whatever the GPU could not give this
 # encode, another job finishes and gives back.
 CUT_RETRY_WAITS = (3, 9)
+CUT_AUDIO_FADE_SECONDS = 0.25
 
 # The cut can stay on the card end to end: NVDEC decodes into GPU memory and
 # NVENC encodes from it, so the CPU never touches a frame. Measured on a real
@@ -362,13 +363,17 @@ def cut_clip(input_video, clip_temp_path, start, end, clip_number):
     session cannot allocate on a GPU that other jobs are filling.
     """
     encode_args = video_encode_args(INTERMEDIATE)
+    # A short fade so the sound does not stop dead on the last frame.
+    fade_at = max(0.0, float(end) - float(start) - CUT_AUDIO_FADE_SECONDS)
+    audio_args = ['-af', f'afade=t=out:st={fade_at:.3f}:d={CUT_AUDIO_FADE_SECONDS}',
+                  *audio_encode_args()]
     command = [
         'ffmpeg', '-y',
         '-ss', str(start),
         '-to', str(end),
         '-i', input_video,
         *encode_args,
-        *audio_encode_args(),
+        *audio_args,
         clip_temp_path
     ]
     gpu_command = None
@@ -381,7 +386,7 @@ def cut_clip(input_video, clip_temp_path, start, end, clip_number):
             del gpu_args[i:i + 2]
         gpu_command = ['ffmpeg', '-y', '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
                        '-ss', str(start), '-to', str(end), '-i', input_video,
-                       *gpu_args, *audio_encode_args(), clip_temp_path]
+                       *gpu_args, *audio_args, clip_temp_path]
 
     def _run_one(cmd):
         result = subprocess.run(cmd, stdout=subprocess.DEVNULL,

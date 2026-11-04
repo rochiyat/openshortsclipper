@@ -32,6 +32,7 @@ import llm_backend
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, dedupe_overlapping,
                             score_batches, shortlist_target,
+                            end_on_sentence, sentence_end_times,
                             snap_clip_to_words, trim_to_best)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, cut_clip, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB)
@@ -658,7 +659,7 @@ def get_video_resolution(video_path):
 # The old cap was 100 CHARACTERS, which is 300 bytes of Bengali or Arabic — over
 # the limit before any decoration. It surfaced as OSError 36 killing the hook
 # endpoint in prod on 26-jul-2026.
-MAX_TITLE_BYTES = 120
+MAX_TITLE_BYTES = 45 if sys.platform == "win32" else 120
 
 
 def truncate_bytes(text, max_bytes):
@@ -2135,6 +2136,14 @@ def get_viral_clips(transcript_result, video_duration):
 
         # --- Pass 2: detailed clip extraction on the shortlist ---
         min_clips, max_clips = clip_count_targets(len(shortlist))
+        sentence_ends = sentence_end_times(words)
+
+        def _detail_payload(ws):
+            # Without these the model only has the window's edges and its text,
+            # so every clip end is a guess at where a sentence stops.
+            return [{**p, "sentence_ends": [round(t, 2) for t in sentence_ends
+                                            if p["start"] <= t <= p["end"]]}
+                    for p in _payload(ws)]
 
         def _detail_prompt_for(lo, hi):
             # A split batch keeps the full clip-count band: a short list can
@@ -2144,7 +2153,7 @@ def get_viral_clips(transcript_result, video_duration):
                     video_duration=video_duration, language=language,
                     min_clips=lo, max_clips=hi,
                     min_secs=min_secs, max_secs=max_secs,
-                    windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                    windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False))
             return build
 
         shorts = _run_stage_split(client, model_name, shortlist,
@@ -2189,6 +2198,8 @@ def get_viral_clips(transcript_result, video_duration):
             s["proposed"] = [s.get("start", 0), s.get("end", 0)]
             ns, ne = snap_clip_to_words(s.get("start", 0), s.get("end", 0), words, video_duration,
                                         min_duration=min_secs, max_duration=max_secs)
+            ne = end_on_sentence(ns, ne, words, video_duration,
+                                 min_duration=min_secs, max_duration=max_secs)
             s["start"], s["end"] = ns, ne
         deduped = dedupe_overlapping(shorts)
         if len(deduped) < len(shorts):
@@ -2434,6 +2445,9 @@ if __name__ == '__main__':
     else:
         input_video = args.input
         video_title = os.path.splitext(os.path.basename(input_video))[0]
+        if len(video_title) > 37 and video_title[36] == '_' and '-' in video_title[:36]:
+            video_title = video_title[37:]
+        video_title = truncate_bytes(video_title, MAX_TITLE_BYTES)
         
         if args.output and not args.skip_analysis:
             # For multi-clip runs, treat --output as an OUTPUT DIRECTORY (create it if needed).

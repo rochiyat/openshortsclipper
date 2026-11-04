@@ -66,6 +66,7 @@ class TestPromptTemplates:
             min_secs=10.0, max_secs=20.0, windows_json="[]")
         assert "10 to 20 seconds" in text
         assert "return 2 to 4 clips" in text
+        assert "`sentence_ends`" in text
 
     def test_visual_template_carries_band_and_count(self):
         text = _templates()["VISUAL_PROMPT_TEMPLATE"].format(

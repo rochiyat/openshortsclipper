@@ -190,6 +190,12 @@ def test_successful_cut_runs_once(_cut):
     assert "h264_nvenc" in fake.commands[0]
 
 
+def test_cut_fades_the_audio_out_on_its_last_moment(_cut):
+    fake = _cut([(0, 5_000_000, "")])
+    command = fake.commands[0]
+    assert command[command.index("-af") + 1] == "afade=t=out:st=10.250:d=0.25"
+
+
 def test_retry_stays_on_the_gpu_after_a_wait(_cut):
     """No libx264 fallback: the GPU failure is transient, so wait and ask again."""
     fake = _cut([(1, 0, "OpenEncodeSessionEx failed: out of memory"),

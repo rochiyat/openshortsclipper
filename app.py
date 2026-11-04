@@ -1,3 +1,8 @@
+def _win_path(p: str) -> str:
+    if sys.platform == "win32" and isinstance(p, str) and not p.startswith("\\\\?\\"):
+        return "\\\\?\\" + os.path.abspath(p)
+    return p
+
 import os
 import llm_backend
 import re
@@ -966,8 +971,15 @@ def _canonical_clip_file(output_dir, base_name, index):
         derived = []
     if not derived:
         return clean
-    # Highest timestamp wins — that's the most recent styling.
-    return os.path.basename(max(derived, key=os.path.getmtime))
+    def _file_mtime(f):
+        try:
+            return os.path.getmtime(_win_path(f))
+        except OSError:
+            return 0
+    # Prefer final subtitled / wm files over intermediate hooked/recut
+    subtitled = [f for f in derived if os.path.basename(f).startswith(('subtitled_', 'wm_'))]
+    pool = subtitled if subtitled else derived
+    return os.path.basename(max(pool, key=_file_mtime))
 
 
 def _clips_actually_rendered(job_id, output_dir, base_name, clips):
@@ -1002,7 +1014,7 @@ def _clips_actually_rendered(job_id, output_dir, base_name, clips):
                          or _canonical_clip_file(output_dir, base_name, i))
         clip_path = os.path.join(output_dir, clip_filename)
         try:
-            present = os.path.getsize(clip_path) > 0
+            present = os.path.getsize(_win_path(clip_path)) > 0
         except OSError:
             present = False
         if not present:
@@ -3067,9 +3079,14 @@ def _job_nice():
 
 
 def _lower_priority():
+    if sys.platform == 'win32':
+        return
     n = _job_nice()
-    if n:
-        os.nice(n)
+    if n and hasattr(os, 'nice'):
+        try:
+            os.nice(n)
+        except Exception:
+            pass
 
 
 def _job_encode_env(env):
@@ -3114,13 +3131,19 @@ async def run_job(job_id, job_data):
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
     
     try:
+        popen_kwargs = {}
+        if sys.platform != 'win32':
+            popen_kwargs['preexec_fn'] = _lower_priority
+        elif hasattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS'):
+            popen_kwargs['creationflags'] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
+
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, # Merge stderr to stdout
             env=env,
             cwd=os.getcwd(),
-            preexec_fn=_lower_priority,
+            **popen_kwargs,
         )
         
         # We need to capture logs in a thread because Popen isn't async
@@ -3739,7 +3762,7 @@ async def process_endpoint(
     # probe above already gets this right.
     cmd = [sys.executable, "-u", "main.py"] # -u for unbuffered
     env = child_env()
-    if api_key:
+    if api_key and not api_key.startswith("sk-"):
         env["GEMINI_API_KEY"] = api_key # Override with key from request
     else:
         env.pop("GEMINI_API_KEY", None)  # local-LLM job: main.py must not find a stale key

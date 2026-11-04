@@ -7,7 +7,9 @@ from clip_selection import (
     build_transcript_windows,
     clip_count_targets,
     dedupe_overlapping,
+    end_on_sentence,
     score_batches,
+    sentence_end_times,
     shortlist_target,
     snap_clip_to_words,
     compact_words,
@@ -88,6 +90,60 @@ class TestSnapClipToWords:
         words = self._words()
         start, end = snap_clip_to_words(0.0, 59.9, words, 80.0)
         assert end - start <= 60.0
+
+
+class TestSentenceEndTimes:
+    def test_marks_and_closing_quotes_finish_a_sentence(self):
+        words = [_word(" one.", 0, 1), _word(' two?"', 1, 2), _word(" three", 2, 3), _word(" four", 3, 4)]
+        assert sentence_end_times(words) == [1, 2, 4]
+
+    def test_a_decimal_inside_a_word_does_not(self):
+        words = [_word(" Rp602.000", 0, 1), _word(" lagi", 1, 2), _word(" nanti", 2, 3)]
+        assert sentence_end_times(words) == [3]
+
+    def test_a_long_pause_finishes_a_thought_without_a_mark(self):
+        words = [_word(" a", 0, 1), _word(" b", 1.7, 2), _word(" c", 2.1, 3)]
+        assert sentence_end_times(words) == [1, 3]
+
+
+class TestEndOnSentence:
+    """A word every second, a sentence closing on every word listed in `marks`."""
+
+    @staticmethod
+    def _words(marks, total=100):
+        return [_word(f" w{i}{'.' if i in marks else ''}", float(i), i + 1.0) for i in range(total)]
+
+    def test_extends_to_the_next_sentence_end(self):
+        assert end_on_sentence(0.0, 30.0, self._words({35}), 200.0) == 36.0
+
+    def test_takes_a_sentence_end_the_model_almost_hit(self):
+        # 31 is reachable backwards within `near`, 35 is only further on.
+        assert end_on_sentence(0.0, 32.0, self._words({30, 35}), 200.0) == 31.0
+
+    def test_never_extends_past_the_maximum(self):
+        # The next end would make 65 s, so it steps back to the previous one.
+        assert end_on_sentence(0.0, 58.0, self._words({50, 64}), 200.0) == 51.0
+
+    def test_never_trims_under_the_minimum(self):
+        assert end_on_sentence(0.0, 20.0, self._words({10}), 200.0) == 20.0
+
+    def test_keeps_the_end_when_no_sentence_is_within_reach(self):
+        assert end_on_sentence(0.0, 30.0, self._words({5, 90}), 200.0) == 30.0
+
+    def test_an_end_already_in_silence_is_left_alone(self):
+        words = [_word(" a", 0.0, 1.0), _word(" b", 40.0, 41.0), _word(" c", 41.0, 42.0)]
+        assert end_on_sentence(0.0, 20.0, words, 200.0) == 20.0
+
+    def test_trails_into_the_pause_after_the_sentence(self):
+        words = [_word(" a.", 0.0, 30.0), _word(" b", 31.0, 40.0)]
+        assert end_on_sentence(0.0, 29.5, words, 200.0) == 30.45
+
+    def test_never_runs_past_the_video(self):
+        words = [_word(" a", 0.0, 29.0), _word(" b.", 29.0, 30.0)]
+        assert end_on_sentence(0.0, 29.0, words, 30.2) == 30.2
+
+    def test_no_words_keeps_the_end(self):
+        assert end_on_sentence(0.0, 30.0, [], 200.0) == 30.0
 
 
 class TestPricing:
