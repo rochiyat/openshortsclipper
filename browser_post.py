@@ -105,13 +105,14 @@ def _run_worker(job: dict) -> dict:
 
 
 def start(platform: str, *, file_path: str, title: str, description: str,
-          visibility: str = "public") -> str:
+          visibility: str = "public", thumbnail_path: str = None) -> str:
     """Start an upload in the background and return its request id."""
     request_id = f"{REQUEST_PREFIX}{uuid.uuid4().hex}"
     with _posts_lock:
         _posts[request_id] = {"status": "in_progress", "results": []}
     job = {"platform": platform, "profile_dir": profile_dir(platform), "file_path": file_path,
-           "title": title, "description": description, "visibility": visibility}
+           "title": title, "description": description, "visibility": visibility,
+           "thumbnail_path": thumbnail_path}
 
     def run():
         with _platform_locks[platform]:
@@ -131,6 +132,7 @@ YT_UPLOAD_URL = "https://www.youtube.com/upload"
 YT_FILE_INPUT = "input[type=file]"
 YT_TITLE = "#title-textarea #textbox"
 YT_DESCRIPTION = "#description-textarea #textbox"
+YT_THUMBNAIL_INPUT = "ytcp-thumbnail-uploader input[type=file]"
 YT_NOT_FOR_KIDS = 'tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'
 YT_FOR_KIDS = 'tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_MFK"]'
 YT_NEXT = "#next-button"
@@ -191,6 +193,19 @@ def _yt_fill_details(page, job: dict):
                    for s in (YT_FOR_KIDS, YT_NOT_FOR_KIDS))
     if not answered:
         page.locator(YT_NOT_FOR_KIDS).click()
+
+
+def _yt_set_thumbnail(page, thumbnail_path: str) -> bool:
+    """Hand Studio the thumbnail. False when the page offers no way to: custom
+    Shorts thumbnails reach channels gradually, and the video still has to go out."""
+    uploader = page.locator(YT_THUMBNAIL_INPUT).first
+    try:
+        uploader.wait_for(state="attached", timeout=15_000)
+        uploader.set_input_files(thumbnail_path)
+    except PlaywrightTimeoutError:
+        return False
+    page.wait_for_timeout(3000)
+    return True
 
 
 def _yt_wait_for_upload(page, uploaded: list):
@@ -257,6 +272,8 @@ def _youtube_flow(page, job: dict) -> dict:
     page.on("response", lambda r: uploaded.append(True) if _is_upload_complete(r) else None)
     _yt_open_upload_dialog(page, job["file_path"])
     _yt_fill_details(page, job)
+    thumbnail = job.get("thumbnail_path")
+    thumbnail_set = bool(thumbnail) and _yt_set_thumbnail(page, thumbnail)
     for _ in range(YT_STEPS_TO_VISIBILITY):
         page.locator(YT_NEXT).click(timeout=60_000)
     page.locator(f'tp-yt-paper-radio-button[name="{job["visibility"].upper()}"]').click(timeout=60_000)
@@ -265,7 +282,10 @@ def _youtube_flow(page, job: dict) -> dict:
     url = link.get_attribute("href")
     _yt_wait_for_upload(page, uploaded)
     _yt_finish(page, job["title"])
-    return {"success": True, "message": f"Posted as {job['visibility']}.", "url": url}
+    message = f"Posted as {job['visibility']}."
+    if thumbnail and not thumbnail_set:
+        message += " YouTube Studio offered no thumbnail upload, so YouTube picked one."
+    return {"success": True, "message": message, "url": url}
 
 
 def _run_job(job: dict) -> dict:

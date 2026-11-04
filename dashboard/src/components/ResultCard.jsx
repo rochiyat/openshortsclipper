@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Image as ImageIcon } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import { track } from '../lib/analytics';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
+import ClipThumbnailModal, { ThumbnailGrid } from './ClipThumbnailModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
@@ -37,7 +38,8 @@ async function followPost(requestId, tries = 12, everyMs = 5000) {
             .map((x) => `${x.platform}${x.message ? `: ${x.message}` : ''}`);
         if (d.status !== 'completed' && !failed.length) failed.push('every platform');
         const url = (d.results || []).find((x) => x.url)?.url || null;
-        return { done: d.status === 'completed', failed, url };
+        const message = (d.results || []).find((x) => x.success && x.message)?.message || null;
+        return { done: d.status === 'completed', failed, url, message };
     }
     return { done: false, failed: [] };
 }
@@ -244,6 +246,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const [browserPlatforms, setBrowserPlatforms] = useState(null);
     const [visibility, setVisibility] = useState('public');
     const viaBrowser = provider === 'browser';
+    const [showThumbModal, setShowThumbModal] = useState(false);
+    const [thumbnails, setThumbnails] = useState([]);
+    const [selectedThumb, setSelectedThumb] = useState(null);
     const [copied, setCopied] = useState(null);
 
     const handleCopy = async (field, text) => {
@@ -355,6 +360,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 .then((r) => (r.ok ? r.json() : null))
                 .then((d) => setBrowserPlatforms(d?.enabled && d.platforms?.length ? d.platforms : null))
                 .catch(() => setBrowserPlatforms(null));
+            apiFetch(`/api/clip/${jobId}/${index}/thumbnails`)
+                .then((r) => (r.ok ? r.json() : null))
+                .then((d) => { if (d) setThumbnails(d.thumbnails || []); })
+                .catch(() => {});
         }
         // Reset only when the modal opens for a clip; connection changes while
         // it is open must not wipe the user's selection.
@@ -745,6 +754,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         else if (autoAction === 'subtitles') setShowSubtitleModal(true);
         else if (autoAction === 'hook') setShowHookModal(true);
         else if (autoAction === 'dub') setShowTranslateModal(true);
+        else if (autoAction === 'thumbnail') setShowThumbModal(true);
         else if (autoAction === 'post') setShowModal(true);
         onAutoActionDone?.();
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -786,7 +796,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 title: postTitle,
                 description: postDescription,
                 ...(viaBrowser
-                    ? { provider: 'browser', visibility }
+                    ? { provider: 'browser', visibility, ...(selectedThumb ? { thumbnail: selectedThumb } : {}) }
                     : { api_key: uploadPostKey, user_id: uploadUserId }),
             };
 
@@ -828,7 +838,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 track('SocialPostFailed', { props: { platforms: selectedPlatforms.join(',') } });
             } else if (viaBrowser && outcome.done) {
                 // Stays open so the link to the new video can be followed.
-                setPostResult({ success: true, msg: "Posted successfully!", url: outcome.url });
+                setPostResult({ success: true, msg: outcome.message || "Posted successfully!", url: outcome.url });
             } else {
                 setPostResult({ success: true, msg: outcome.done ? "Posted successfully!" : "Still publishing: check your accounts in a few minutes." });
                 setTimeout(() => {
@@ -1079,6 +1089,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         {isTranslating ? 'translating…' : 'dub voice'}
                     </button>
 
+                    <button onClick={() => setShowThumbModal(true)} className={QUIET_BTN}>
+                        <ImageIcon size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
+                        thumbnail
+                    </button>
+
                     <button
                         onClick={() => setShowModal(true)}
                         className="btn-primary flex-col gap-1 py-2.5 sm:py-2 px-1 text-[11px] leading-none rounded-input whitespace-nowrap"
@@ -1232,6 +1247,26 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         </div>
                     )}
 
+                    {viaBrowser && (
+                        <div>
+                            <div className="flex items-center justify-between gap-2 mb-2">
+                                <label className="eyebrow">YOUTUBE THUMBNAIL</label>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowThumbModal(true)}
+                                    className="text-xs lowercase text-muted hover:text-brass underline underline-offset-2 transition-colors"
+                                >
+                                    generate
+                                </button>
+                            </div>
+                            {thumbnails.length ? (
+                                <ThumbnailGrid thumbnails={thumbnails} selected={selectedThumb} onSelect={setSelectedThumb} />
+                            ) : (
+                                <p className="text-xs text-muted lowercase">none yet: youtube picks one from the video.</p>
+                            )}
+                        </div>
+                    )}
+
                     {/* Scheduling */}
                     {!viaBrowser && <div className="p-3 bg-paper rounded-input border border-rule">
                         <label className="flex items-center justify-between cursor-pointer">
@@ -1318,6 +1353,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 serverRender={hasServerBurns}
                 burnedHook={burnedHook}
                 onRemove={burnedHook ? handleRemoveHook : null}
+            />
+
+            <ClipThumbnailModal
+                isOpen={showThumbModal}
+                onClose={() => setShowThumbModal(false)}
+                jobId={jobId}
+                clipIndex={index}
+                geminiApiKey={geminiApiKey}
+                thumbnails={thumbnails}
+                onThumbnails={setThumbnails}
+                selected={selectedThumb}
+                onSelect={setSelectedThumb}
             />
 
             <TranslateModal

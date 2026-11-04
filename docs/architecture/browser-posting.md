@@ -42,6 +42,9 @@ one platform run one at a time, because a profile can only be open once.
   stays in the page, so "the dialog closed" alone is not the signal.
 - "Made for kids" is the channel owner's declaration: a channel default is kept,
   and only an unanswered question is set to "not made for kids".
+- A chosen thumbnail is handed to Studio's own file input before Next. Custom Shorts
+  thumbnails reach channels gradually, so a channel without the input still posts the
+  video and the result says YouTube picked the thumbnail.
 
 ## Limits
 

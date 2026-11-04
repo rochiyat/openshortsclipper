@@ -4535,7 +4535,9 @@ from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_f
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import (analyze_video_for_titles, refine_titles, generate_thumbnail,
-                       generate_youtube_description, extract_face_frames)
+                       generate_youtube_description, extract_face_frames, CLIP_TEMPLATES,
+                       CLIP_TEMPLATE_IDS, clip_thumbnail_instructions, fetch_style_reference,
+                       save_style_reference)
 
 class EditRequest(BaseModel):
     job_id: str
@@ -6269,6 +6271,7 @@ class SocialPostRequest(BaseModel):
     timezone: Optional[str] = "UTC"
     provider: str = "upload_post"  # or "browser" (browser_post.py, self-host opt-in)
     visibility: str = "public"  # browser provider only
+    thumbnail: Optional[str] = None  # browser provider only: a file of the clip's thumbnails
 
 from urllib.parse import urlparse
 
@@ -6399,6 +6402,14 @@ async def _post_via_browser(req: SocialPostRequest, request: Request):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Video file not found")
 
+    thumbnail_path = None
+    if req.thumbnail:
+        if not _CLIP_THUMB_NAME_RE.fullmatch(req.thumbnail):
+            raise HTTPException(status_code=400, detail="Invalid thumbnail")
+        thumbnail_path = os.path.join(_clip_thumbs_path(req.job_id, req.clip_index), req.thumbnail)
+        if not os.path.isfile(thumbnail_path):
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+
     title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title') or 'Viral Short'
     description = (req.description or clip.get('video_description_for_instagram')
                    or clip.get('video_description_for_tiktok') or '')
@@ -6407,6 +6418,7 @@ async def _post_via_browser(req: SocialPostRequest, request: Request):
         title=browser_post.clean_text(youtube_title(title), YOUTUBE_TITLE_MAX),
         description=browser_post.clean_text(description, 5000),
         visibility=req.visibility,
+        thumbnail_path=os.path.abspath(thumbnail_path) if thumbnail_path else None,
     )
     return {"success": True, "request_id": request_id}
 
@@ -7409,6 +7421,147 @@ async def thumbnail_titles(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _require_paid_thumbnails(request: Request):
+    """Image generation is the one expensive managed Gemini call: paid plans only."""
+    if BILLING_ENABLED:
+        user = await _user_from_request(request)
+        if user is not None and user.plan == "free":
+            raise HTTPException(status_code=403, detail={
+                "error": "plan_required",
+                "message": "AI thumbnail generation is available on paid plans.",
+            })
+
+
+# A clip's thumbnails live with the job, so they are served, authorised and swept
+# like its video: /videos/<job>/clip_thumbs/<clip index>/thumb_<batch>_<n>.jpg
+CLIP_THUMBS_DIR = "clip_thumbs"
+_CLIP_THUMB_NAME_RE = re.compile(r"thumb_[0-9a-f]+_\d+\.jpg")
+
+
+def _clip_thumbs_path(job_id: str, clip_index: int) -> str:
+    return os.path.join(OUTPUT_DIR, job_id, CLIP_THUMBS_DIR, str(clip_index))
+
+
+def _list_clip_thumbnails(job_id: str, clip_index: int) -> list:
+    """The clip's thumbnails, newest first."""
+    folder = _clip_thumbs_path(job_id, clip_index)
+    try:
+        names = [n for n in os.listdir(folder) if _CLIP_THUMB_NAME_RE.fullmatch(n)]
+    except OSError:
+        return []
+    names.sort(key=lambda n: (-os.path.getmtime(os.path.join(folder, n)), n))
+    return [{"file": n, "url": f"/videos/{job_id}/{CLIP_THUMBS_DIR}/{clip_index}/{n}"} for n in names]
+
+
+async def _clip_for_thumbnails(job_id: str, clip_index: int, request: Request) -> dict:
+    await _ensure_job_files(job_id, request)
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _assert_job_owner(request, job)
+    clips = (job.get('result') or {}).get('clips') or []
+    if not 0 <= clip_index < len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    return clips[clip_index]
+
+
+@app.get("/api/clip/{job_id}/{clip_index}/thumbnails")
+async def clip_thumbnails_list(job_id: str, clip_index: int, request: Request):
+    await _clip_for_thumbnails(job_id, clip_index, request)
+    templates = [{"id": t["id"], "label": t["label"], "hint": t["hint"]} for t in CLIP_TEMPLATES]
+    return {"thumbnails": _list_clip_thumbnails(job_id, clip_index), "templates": templates}
+
+
+@app.post("/api/clip/{job_id}/{clip_index}/thumbnails")
+async def clip_thumbnails_generate(
+    job_id: str,
+    clip_index: int,
+    request: Request,
+    template: str = Form("auto"),
+    count: int = Form(3),
+    template_url: str = Form(""),
+    template_file: Optional[UploadFile] = File(None),
+):
+    """Vertical thumbnails for one clip. The look comes from a template in the
+    list, or from an image the user uploads or links, used as a style reference."""
+    api_key = await resolve_gemini(request)
+    if not api_key:
+        raise gemini_missing_error()
+    await _require_paid_thumbnails(request)
+    clip = await _clip_for_thumbnails(job_id, clip_index, request)
+    if template not in CLIP_TEMPLATE_IDS:
+        raise HTTPException(status_code=400, detail="Unknown template")
+    count = min(max(1, count), 6)
+
+    video_path = os.path.join(OUTPUT_DIR, job_id, os.path.basename(clip.get('video_url') or ''))
+    if not os.path.isfile(video_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    folder = _clip_thumbs_path(job_id, clip_index)
+    os.makedirs(folder, exist_ok=True)
+    # Dotfiles are never served: the reference and the frames are only inputs.
+    work_dir = os.path.join(folder, f".work_{uuid.uuid4().hex[:8]}")
+    os.makedirs(work_dir)
+    style_path = os.path.join(work_dir, "style.jpg")
+    reservation_id = None
+    try:
+        # Before reserving: a bad image or link costs the user nothing.
+        try:
+            if template_file and template_file.filename:
+                await asyncio.to_thread(
+                    save_style_reference, await template_file.read(), style_path)
+            elif template_url.strip():
+                await asyncio.to_thread(fetch_style_reference, template_url, style_path)
+            else:
+                style_path = None
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        thumb_minutes = _cloud_config.THUMBNAIL_MINUTES if BILLING_ENABLED else 0
+        reservation_id = await reserve_managed_action(request, thumb_minutes, job_id, "thumbnail")
+
+        title = clip.get('video_title_for_youtube_short') or clip.get('title') or 'Short clip'
+        context = "\n".join(str(v) for v in (
+            clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok'),
+            clip.get('why'),
+        ) if v)
+        spec = video_requirements.load(os.path.join(OUTPUT_DIR, job_id))
+        instructions = clip_thumbnail_instructions(
+            template, has_style_reference=bool(style_path), must_avoid=spec.get("must_avoid", ""))
+
+        def render():
+            # The person in the clip, when a face can be found: without one the
+            # concepts are built around objects, which is still a thumbnail.
+            frame = None
+            try:
+                frames = extract_face_frames(video_path, job_id, n=1, out_dir=work_dir)
+                frame = frames[0] if frames else None
+            except Exception as e:
+                print(f"⚠️ [Thumbnail] No frame from the clip: {e}")
+            return generate_thumbnail(
+                api_key, title, job_id, extra_prompt=instructions, count=count,
+                video_context=context, language="the same language as the video title",
+                frame_reference=frame, output_dir=folder,
+                url_prefix=f"/videos/{job_id}/{CLIP_THUMBS_DIR}/{clip_index}",
+                vertical=True, style_reference_path=style_path)
+
+        generated = await asyncio.to_thread(render)
+        if reservation_id:
+            await _metering.commit_reservation(reservation_id)
+        return {"generated": len(generated), "thumbnails": _list_clip_thumbnails(job_id, clip_index)}
+    except HTTPException:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        raise
+    except Exception as e:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        print(f"❌ Clip Thumbnail Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 @app.post("/api/thumbnail/generate")
 async def thumbnail_generate(
     request: Request,
@@ -7432,14 +7585,7 @@ async def thumbnail_generate(
     if not api_key:
         raise gemini_missing_error()
 
-    # Image generation is the one expensive managed Gemini call — paid plans only.
-    if BILLING_ENABLED:
-        user = await _user_from_request(request)
-        if user is not None and user.plan == "free":
-            raise HTTPException(status_code=403, detail={
-                "error": "plan_required",
-                "message": "AI thumbnail generation is available on paid plans.",
-            })
+    await _require_paid_thumbnails(request)
     # The session carries someone's transcript, titles and frames: only its
     # owner may generate from it (and be billed for it).
     _sess = thumbnail_sessions.get(session_id)

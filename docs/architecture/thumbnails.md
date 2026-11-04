@@ -30,6 +30,26 @@ sharpness (MediaPipe + Laplacian), keeps them spread across the runtime, and the
 dashboard offers them as the person reference so the thumbnail shows the creator;
 an uploaded face photo still wins.
 
+## A clip's thumbnails
+
+`/api/clip/{job}/{index}/thumbnails` makes vertical thumbnails for one finished clip
+(default 3, on request, never automatically: each one is an image call). They live in
+`output/<job>/clip_thumbs/<index>/` and are served through `/videos`, so they follow the
+job's owner and retention. They are not archived to R2, so a job restored from R2 has none.
+
+- Same engine as above with `vertical=True`: 1080x1920, text only on top or bottom.
+- The look comes from `CLIP_TEMPLATES` or from a user's image, uploaded or linked. A link
+  may be an image, a YouTube video (its thumbnail) or a page declaring `og:image`, and is
+  fetched inside `ssrf_guard.guarded()`. It is a style reference only: the prompt forbids
+  copying its people, text or logos, but nothing checks the result.
+- The templates are hand-picked common formats. Nothing measures their performance, so
+  the dashboard must not call them viral.
+- A clip's frame is the person reference when a face is found. Gemini refusing a public
+  figure falls back to no person, as above.
+- A campaign's `must_avoid` goes to the concept prompt.
+
+Posting one is browser-only for now: see `browser-posting.md`.
+
 ## Sources and limits
 
 A link given to `/api/thumbnail/upload` or `/analyze` goes through

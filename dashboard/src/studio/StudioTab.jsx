@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Loader2, Film, FolderOpen, Download, ArrowLeft, Search, Archive, ArchiveRestore,
   Trash2, Pencil, Check, X, Copy, ExternalLink, TrendingUp, Calendar, FileText,
-  Scissors, Crosshair, Wand2, Type, Languages, Share2,
+  Scissors, Crosshair, Wand2, Type, Languages, Share2, Image as ImageIcon,
 } from 'lucide-react';
 import {
   listProjects, getProject, updateProject, deleteProject, reopenProject,
@@ -383,6 +383,7 @@ const CLIP_TOOLS = [
   { tool: 'subtitles', label: 'subtitles', Icon: Type },
   { tool: 'hook', label: 'edit hook', Icon: Wand2 },
   { tool: 'dub', label: 'dub voice', Icon: Languages },
+  { tool: 'thumbnail', label: 'thumbnail', Icon: ImageIcon },
 ];
 
 function formatClipDuration(seconds) {

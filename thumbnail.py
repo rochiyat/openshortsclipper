@@ -1,8 +1,10 @@
 import io
 import os
+import re
 import uuid
 import json
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urljoin
 
 from google import genai
 from google.genai import types
@@ -27,9 +29,43 @@ TITLE_MOBILE_CHARS = 50
 TITLE_MAX_CHARS = 65
 
 THUMB_W, THUMB_H = 1280, 720
+CLIP_THUMB_SIZE = (1080, 1920)  # a clip is vertical, and Studio asks 9:16 for a Short
 THUMB_MAX_BYTES = 2 * 1024 * 1024  # YouTube's upload limit
 THUMB_FONT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Anton-Regular.ttf")
 TEXT_POSITIONS = ("left", "right", "top", "bottom")
+
+# Common thumbnail formats, chosen by hand: nothing here measures that one
+# performs better, so the dashboard does not call them viral.
+CLIP_TEMPLATES = (
+    {"id": "auto", "label": "mixed", "hint": "a different format for each thumbnail",
+     "prompt": ""},
+    {"id": "reaction", "label": "reaction close-up", "hint": "a big face and a few big words",
+     "prompt": "Every concept is a tight close-up of a strong, natural facial reaction, combined "
+               "with one prop or detail that shows what the clip is about."},
+    {"id": "number", "label": "big number", "hint": "one figure as the hero",
+     "prompt": "Every concept makes one number or result from the clip the hero: the text is that "
+               "number with at most two words. Use a figure only if the clip's context states it."},
+    {"id": "question", "label": "curiosity question", "hint": "a short question left open",
+     "prompt": "Every concept's text is a short question that the clip answers, without giving the "
+               "answer away, over a scene that makes the viewer want to know."},
+    {"id": "quote", "label": "short quote", "hint": "the strongest line of the clip",
+     "prompt": "Every concept's text is the strongest short line actually said in the clip, over a "
+               "calm, dark scene that keeps it readable."},
+    {"id": "before_after", "label": "before / after", "hint": "two states, split in the frame",
+     "prompt": "Every concept shows two contrasting states, one above the other, separated by a "
+               "clear visual break. Only use a contrast the clip's context supports."},
+)
+CLIP_TEMPLATE_IDS = tuple(t["id"] for t in CLIP_TEMPLATES)
+
+STYLE_MAX_BYTES = 10 * 1024 * 1024
+STYLE_MAX_PIXELS = 40_000_000
+STYLE_SIDE = 1536
+_YOUTUBE_ID_RE = re.compile(
+    r'^https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?(?:.*&)?v=|shorts/|embed/)|youtu\.be/)([\w-]{11})')
+_OG_IMAGE_RE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)'
+    r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']',
+    re.IGNORECASE)
 
 
 def _parse_json(text):
@@ -255,17 +291,17 @@ OUTPUT JSON:
 # Frames from the video
 # ---------------------------------------------------------------------------
 
-def extract_face_frames(video_path, session_id, n=5, samples=40):
+def extract_face_frames(video_path, session_id, n=5, samples=40, out_dir=None):
     """
     Frames from the video worth building a thumbnail on: a large, sharp face,
     spread across the runtime so the user gets different moments, not five
     near-duplicates of one second. Saved as JPEGs under the session's
-    thumbnails dir. Returns [{"url", "path", "time", "face": [x, y, w, h]}].
+    thumbnails dir, or out_dir. Returns [{"url", "path", "time", "face": [x, y, w, h]}].
     """
     import cv2
     from main import detect_face_candidates
 
-    out_dir = os.path.join("output", "thumbnails", session_id, "frames")
+    out_dir = out_dir or os.path.join("output", "thumbnails", session_id, "frames")
     os.makedirs(out_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(video_path)
@@ -565,19 +601,20 @@ def _ai_save_kwargs(img):
     return kwargs
 
 
-def finalize_thumbnail(img, out_path):
-    """Cover-crop to 1280x720 and save a JPEG under YouTube's 2 MB limit.
+def finalize_thumbnail(img, out_path, size=(THUMB_W, THUMB_H)):
+    """Cover-crop to `size` and save a JPEG under YouTube's 2 MB limit.
 
     Every file that leaves here is machine-marked as AI-generated — see
     AI_XMP_PACKET.
     """
+    width, height = size
     img = img.convert("RGB")
-    scale = max(THUMB_W / img.width, THUMB_H / img.height)
-    img = img.resize((max(THUMB_W, int(img.width * scale + 0.5)),
-                      max(THUMB_H, int(img.height * scale + 0.5))), Image.LANCZOS)
-    left = (img.width - THUMB_W) // 2
-    top = (img.height - THUMB_H) // 2
-    img = img.crop((left, top, left + THUMB_W, top + THUMB_H))
+    scale = max(width / img.width, height / img.height)
+    img = img.resize((max(width, int(img.width * scale + 0.5)),
+                      max(height, int(img.height * scale + 0.5))), Image.LANCZOS)
+    left = (img.width - width) // 2
+    top = (img.height - height) // 2
+    img = img.crop((left, top, left + width, top + height))
     marks = _ai_save_kwargs(img)
     for q in (92, 88, 84, 78, 70, 60):
         try:
@@ -600,7 +637,8 @@ def _image_part(path):
     return types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
 
 
-def _generate_one(client, concept, reference_images, out_path, burn_text):
+def _generate_one(client, concept, reference_images, out_path, burn_text,
+                  vertical=False, style_reference=None):
     """One image call for one concept; returns the saved path or raises."""
     if burn_text:
         pos = concept['text_position']
@@ -613,25 +651,31 @@ def _generate_one(client, concept, reference_images, out_path, burn_text):
         text_rule = (f'Render the text "{concept["text"]}" in huge bold condensed sans-serif capitals, '
                      f'{concept["text_color"]} with a thick black outline, on the {concept["text_position"]} '
                      "side, spelled EXACTLY as given. No other text.")
-    prompt = f"""Generate a professional YouTube thumbnail, 16:9.
+    shape, small_size = ("vertical 9:16", "94x168") if vertical else ("16:9", "168x94")
+    prompt = f"""Generate a professional YouTube thumbnail, {shape}.
 
 {concept['scene']}
 
 {text_rule}
 
-Style: high contrast, saturated colours, crisp subject separation, cinematic lighting, sharp focus on the subject, readable at 168x94 pixels. No clutter, no small details, no borders, no watermark."""
+Style: high contrast, saturated colours, crisp subject separation, cinematic lighting, sharp focus on the subject, readable at {small_size} pixels. No clutter, no small details, no borders, no watermark."""
+    if style_reference is not None:
+        prompt += ("\nSTYLE REFERENCE: the last image provided is only a style reference. Follow its layout, "
+                   "colour mood, lighting and composition. Do NOT copy its people, faces, text, logos, "
+                   "characters or any other identifiable element.")
     if reference_images:
         prompt += ("\nIDENTITY: the person in the provided photo must appear as EXACTLY the same real person: "
                    "identical face shape, skin, eyes, glasses, facial hair, hairstyle and hair length, age and "
                    "body type. Photorealistic, like a photo of them; do not idealize, slim, rejuvenate or "
                    "stylize them. Expression may change slightly but must stay natural and true to their face.")
 
+    style_parts = [style_reference] if style_reference is not None else []
     response = client.models.generate_content(
         model=IMAGE_MODEL,
-        contents=reference_images + [prompt],
+        contents=reference_images + style_parts + [prompt],
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
-            image_config=types.ImageConfig(aspect_ratio="16:9", image_size="2K"),
+            image_config=types.ImageConfig(aspect_ratio="9:16" if vertical else "16:9", image_size="2K"),
         ),
     )
     if not response.parts:
@@ -647,22 +691,28 @@ Style: high contrast, saturated colours, crisp subject separation, cinematic lig
         pil = Image.open(io.BytesIO(part.inline_data.data))
         if burn_text:
             pil = burn_thumbnail_text(pil, concept["text"], concept["text_position"], concept["text_color"])
-        return finalize_thumbnail(pil, out_path)
+        return finalize_thumbnail(pil, out_path, CLIP_THUMB_SIZE if vertical else (THUMB_W, THUMB_H))
     raise RuntimeError("Gemini returned no image")
 
 
 def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None,
                        extra_prompt="", count=3, video_context="", burn_text=True,
-                       thumbnail_text_hint="", language="en", frame_reference=None):
+                       thumbnail_text_hint="", language="en", frame_reference=None,
+                       output_dir=None, url_prefix=None, vertical=False, style_reference_path=None):
     """
     Generates `count` thumbnails, each from its own concept, in parallel.
     frame_reference: {"path", "face"} from extract_face_frames, used as the
     person reference when the user picked a frame instead of uploading a photo.
+    output_dir + url_prefix: where the files go and are served from, instead of
+    the session's thumbnails dir. vertical: 9:16 instead of 16:9.
+    style_reference_path: an image whose look to follow, never its content.
     Returns [{"url", "text", "why"}] (only the ones that rendered).
     """
     client = genai.Client(api_key=api_key)
-    output_dir = os.path.join("output", "thumbnails", session_id)
+    output_dir = output_dir or os.path.join("output", "thumbnails", session_id)
+    url_prefix = url_prefix or f"/thumbnails/{session_id}"
     os.makedirs(output_dir, exist_ok=True)
+    style_reference = _image_part(style_reference_path) if style_reference_path else None
 
     # References travel as immutable byte parts: one PIL Image shared by the
     # worker threads below raced inside the SDK's encoder and every call died.
@@ -680,6 +730,9 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
         client, title, count, video_context=video_context, extra_prompt=extra_prompt,
         thumbnail_text_hint=thumbnail_text_hint, has_person=bool(reference_images), language=language)
     for i, c in enumerate(concepts):
+        # A side column is too narrow for a headline in a vertical frame.
+        if vertical and c["text_position"] in ("left", "right"):
+            c["text_position"] = "top"
         print(f"🎨 [Thumbnail] Concept {i + 1}: \"{c['text']}\" ({c['text_position']}) - {c['why']}")
 
     # Unique names per batch so a regenerate never serves a stale cached file.
@@ -690,7 +743,8 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
         concept = concepts[i]
         try:
             try:
-                _generate_one(client, concept, reference_images, out_path, burn_text)
+                _generate_one(client, concept, reference_images, out_path, burn_text,
+                              vertical=vertical, style_reference=style_reference)
                 fallback = False
             except RuntimeError as e:
                 if "no image" not in str(e):
@@ -703,10 +757,11 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
                     "Do not depict any real, named or recognisable person; if a presenter is needed, "
                     "show a generic one seen from behind or in silhouette, or use an object instead. "
                     + concept["scene"]))
-                _generate_one(client, generic, [], out_path, burn_text)
+                _generate_one(client, generic, [], out_path, burn_text,
+                              vertical=vertical, style_reference=style_reference)
                 fallback = True
             print(f"✅ [Thumbnail] Saved: {out_path}")
-            return {"url": f"/thumbnails/{session_id}/{os.path.basename(out_path)}",
+            return {"url": f"{url_prefix}/{os.path.basename(out_path)}",
                     "text": concept["text"], "why": concept["why"], "fallback": fallback}
         except Exception as e:
             print(f"❌ [Thumbnail] Generation {i + 1} failed: {e}")
@@ -720,6 +775,81 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
         last_error = next((r["error"] for r in results if "error" in r), "unknown")
         raise RuntimeError(f"All thumbnail generations failed. Last error: {last_error}")
     return thumbnails
+
+
+def clip_thumbnail_instructions(template_id, has_style_reference=False, must_avoid=""):
+    """What a clip's chosen template, and its campaign's rules, ask of the concepts."""
+    template = next((t for t in CLIP_TEMPLATES if t["id"] == template_id), CLIP_TEMPLATES[0])
+    lines = ["The frame is VERTICAL (9:16): text_position must be \"top\" or \"bottom\", and the "
+             "subject goes in the rest of the frame. Keep the design true to this short clip."]
+    if template["prompt"]:
+        lines.append(template["prompt"])
+    if has_style_reference:
+        lines.append("A style reference image is provided to the artist, so describe the scene's "
+                     "subject and leave the look to that reference.")
+    if must_avoid:
+        lines.append(f"The campaign forbids the following, in the text and in the picture:\n{must_avoid}")
+    return "\n".join(lines)
+
+
+def save_style_reference(data, out_path):
+    """Check uploaded or downloaded bytes are an image and keep them as a bounded
+    JPEG. Raises ValueError with a message fit for a 400."""
+    if len(data) > STYLE_MAX_BYTES:
+        raise ValueError(f"The template image is limited to {STYLE_MAX_BYTES // (1024 * 1024)} MB")
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            if img.width * img.height > STYLE_MAX_PIXELS:
+                raise ValueError("The template image is too large")
+            rgb = img.convert("RGB")
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("The template could not be read as an image")
+    rgb.thumbnail((STYLE_SIDE, STYLE_SIDE))
+    rgb.save(out_path, "JPEG", quality=90)
+    return out_path
+
+
+def _download_limited(client, url):
+    """(bytes, content type, final URL), stopping as soon as it passes the limit."""
+    with client.stream("GET", url) as response:
+        if response.status_code != 200:
+            raise ValueError(f"The template link answered with an error ({response.status_code})")
+        chunks, total = [], 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > STYLE_MAX_BYTES:
+                raise ValueError(f"The template image is limited to {STYLE_MAX_BYTES // (1024 * 1024)} MB")
+            chunks.append(chunk)
+        return b"".join(chunks), response.headers.get("content-type", ""), str(response.url)
+
+
+def fetch_style_reference(url, out_path):
+    """Save the image behind a template link: a direct image, a YouTube video (its
+    thumbnail) or a page that declares a preview image. Raises ValueError."""
+    import httpx
+    import ssrf_guard
+    from security_utils import UnsafeURLError, assert_public_url
+
+    url = (url or "").strip()
+    youtube = _YOUTUBE_ID_RE.match(url)
+    if youtube:
+        url = f"https://i.ytimg.com/vi/{youtube.group(1)}/hqdefault.jpg"
+    try:
+        with ssrf_guard.guarded(), httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            data, content_type, final_url = _download_limited(client, assert_public_url(url))
+            if "html" in content_type.lower():
+                found = _OG_IMAGE_RE.search(data.decode("utf-8", "ignore"))
+                if not found:
+                    raise ValueError("That page has no preview image. Link the image itself, or upload it.")
+                image_url = urljoin(final_url, found.group(1) or found.group(2))
+                data, _, _ = _download_limited(client, assert_public_url(image_url))
+    except UnsafeURLError:
+        raise ValueError("That template link is not allowed")
+    except (httpx.HTTPError, OSError):
+        raise ValueError("The template link could not be downloaded")
+    return save_style_reference(data, out_path)
 
 
 # ---------------------------------------------------------------------------
