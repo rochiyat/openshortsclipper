@@ -1177,6 +1177,9 @@ function App() {
         // The stretch picked under the cost line (seconds); absent = whole video.
         source_start: data.sourceStart ?? null,
         source_end: data.sourceEnd ?? null,
+        // Campaign rules, including the logo as a data URL. A string so the
+        // same value travels in the JSON body and in the upload's form fields.
+        video_requirements: data.videoRequirements ? JSON.stringify(data.videoRequirements) : null,
       };
 
       if (data.type === 'url') {

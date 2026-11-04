@@ -90,7 +90,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // subtitled file (double-subtitle bug).
     const stripBurns = (filename) => {
         let f = filename || '', prev;
-        do { prev = f; f = f.replace(/^subtitled_\d+_/, '').replace(/^hooked_\d+_/, '').replace(/^hook_/, ''); } while (f !== prev);
+        do { prev = f; f = f.replace(/^brand_/, '').replace(/^subtitled_\d+_/, '').replace(/^hooked_\d+_/, '').replace(/^hook_/, ''); } while (f !== prev);
         return f;
     };
     const originalVideoUrl = getApiUrl((clip.video_url || '').replace(/[^/]+$/, stripBurns((clip.video_url || '').split('/').pop())));

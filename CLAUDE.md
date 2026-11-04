@@ -44,6 +44,7 @@ Ingest (yt-dlp or upload) → transcription (word timestamps) → scene detectio
 - API endpoints, API keys, MCP, OAuth, webhooks → `docs/architecture/agent-access.md`
 - Autopilot → `docs/architecture/autopilot.md`
 - Free-plan watermark (served `wm_` copy, unmark on upgrade) → `docs/architecture/watermark.md`
+- Campaign requirements (logo, link, required text, must include/avoid; served `brand_` copy) → `docs/architecture/video-requirements.md`
 - Quota wall, free overflow, lifecycle emails, cancel flow, survey, GDPR erasure → `docs/architecture/billing-and-account.md`
 - Concurrency/VRAM, auto-retry, deploy handover and drain → `docs/architecture/jobs-and-deploys.md`
 - Download routing, yt-dlp clients, paid proxy ledger → `docs/architecture/proxy-routing.md`

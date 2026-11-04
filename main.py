@@ -29,6 +29,7 @@ import gemini_worker
 import hook_grounding
 import layout_picker
 import llm_backend
+import video_requirements
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, dedupe_overlapping,
                             score_batches, shortlist_target,
@@ -2118,7 +2119,8 @@ def get_viral_clips(transcript_result, video_duration):
         def _score_prompt(ws):
             return gemini_worker.SCORE_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
-                windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                windows_json=json.dumps(_payload(ws), ensure_ascii=False)
+            ) + video_requirements.prompt_block()
 
         for batch in score_batches(windows, SCORE_BATCH):
             scored.extend(_run_stage_split(
@@ -2153,7 +2155,8 @@ def get_viral_clips(transcript_result, video_duration):
                     video_duration=video_duration, language=language,
                     min_clips=lo, max_clips=hi,
                     min_secs=min_secs, max_secs=max_secs,
-                    windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False))
+                    windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False)
+                ) + video_requirements.prompt_block()
             return build
 
         shorts = _run_stage_split(client, model_name, shortlist,
@@ -2302,7 +2305,8 @@ def get_visual_clips(video_path, video_duration, language="en"):
         prompt = gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
             video_duration=video_duration, language=language,
             min_clips=v_min_clips, max_clips=v_max_clips,
-            min_secs=v_min_secs, max_secs=v_max_secs)
+            min_secs=v_min_secs, max_secs=v_max_secs
+        ) + video_requirements.prompt_block()
         config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=gemini_worker.VisualResponse,
@@ -2361,6 +2365,11 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     output_format = args.format
+
+    # Before the download: the early-audio thread already picks clips. Read from
+    # the job directory, so a resumed or retried job keeps its rules.
+    job_requirements = video_requirements.load(args.output)
+    video_requirements.activate(job_requirements)
 
     script_start_time = time.time()
 
@@ -2621,6 +2630,12 @@ if __name__ == '__main__':
             # Save metadata. Silent videos have no transcript → no subtitles,
             # which is correct (there's no speech to caption).
             clips_data['transcript'] = transcript or {"language": "none", "segments": []}
+            for short in clips_data['shorts']:
+                video_requirements.apply_to_descriptions(short, job_requirements)
+            # The free plan's mark must go over the logo, so with an overlay it
+            # cannot ride the caption encode (that copy would have no logo).
+            mark_inline = (os.environ.get("WATERMARK") == "1"
+                           and not video_requirements.needs_overlay(output_dir, job_requirements))
             # The clip editor's re-render path needs to find the source video
             # again and reproduce the render settings, so record both. The
             # basename is enough — the file sits in the job dir (URL jobs with
@@ -2683,7 +2698,7 @@ if __name__ == '__main__':
                             plan = auto_caption_clip(clip_final_path, transcript, start, end,
                                                      split_ranges=split_ranges, plan_only=True)
                         hooked = auto_hook_clip(clip_final_path, clip, captions=plan,
-                                                mark=os.environ.get("WATERMARK") == "1")
+                                                mark=mark_inline)
                         if hooked:
                             deliver_path, clip['auto_hook'] = hooked
                             captioned = clip['auto_hook'].pop("_captioned", None)
@@ -2692,8 +2707,9 @@ if __name__ == '__main__':
                             captioned = auto_caption_clip(
                                 deliver_path, transcript, start, end,
                                 split_ranges=split_ranges,
-                                mark=os.environ.get("WATERMARK") == "1")
+                                mark=mark_inline)
                         served = captioned or deliver_path
+                        served = video_requirements.brand_delivery(served)
                         if os.environ.get("WATERMARK") == "1":
                             served = mark_delivery(served)
                         print(f"   ✅ Clip {i+1} ready: {clip_final_path}")

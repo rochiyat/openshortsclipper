@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
 import layout_ranges
+import video_requirements
 import watermarked
 import media_auth
 
@@ -966,6 +967,7 @@ def _canonical_clip_file(output_dir, base_name, index):
                    + glob.glob(os.path.join(output_dir, f"recut_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hooked_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hook_{clean}"))
+                   + glob.glob(os.path.join(output_dir, f"brand_*{clean}"))
                    + glob.glob(os.path.join(output_dir, f"wm_*{clean}")))
     except Exception:
         derived = []
@@ -976,8 +978,9 @@ def _canonical_clip_file(output_dir, base_name, index):
             return os.path.getmtime(_win_path(f))
         except OSError:
             return 0
-    # Prefer final subtitled / wm files over intermediate hooked/recut
-    subtitled = [f for f in derived if os.path.basename(f).startswith(('subtitled_', 'wm_'))]
+    # Prefer final subtitled / brand / wm files over intermediate hooked/recut
+    subtitled = [f for f in derived
+                 if os.path.basename(f).startswith(('subtitled_', 'brand_', 'wm_'))]
     pool = subtitled if subtitled else derived
     return os.path.basename(max(pool, key=_file_mtime))
 
@@ -1033,11 +1036,18 @@ def _strip_watermark_copy(output_dir, filename):
     one next to it (see the ``watermarked`` module); every derivation starts
     from the clean one, so the mark is always the outermost layer to strip.
     Same fail-safe contract as the other walk-backs: unchanged when there is
-    nothing to strip or the twin is gone."""
+    nothing to strip or the twin is gone.
+
+    A ``brand_`` copy (video requirements) sits right under the mark and is
+    stripped with it: ``_deliver`` puts it back on whatever the edit produces."""
     if watermarked.is_marked(filename):
         clean = watermarked.clean_name(filename)
         if os.path.exists(os.path.join(output_dir, clean)):
-            return clean
+            filename = clean
+    if filename.startswith(video_requirements.PREFIX):
+        under = video_requirements.unbranded_name(filename)
+        if os.path.exists(os.path.join(output_dir, under)):
+            return under
     return filename
 
 
@@ -1085,13 +1095,19 @@ async def _deliver(request, job_id, filename):
 
     Decided from the caller's plan right now, not from the job's flag: the
     flag is lost on a restart/restore, and a user who upgraded mid-session
-    must get clean files from their next edit on. Self-host never marks."""
+    must get clean files from their next edit on. Self-host never marks.
+
+    The job's required logo and text go on first, whatever the plan
+    (``video_requirements.brand_delivery``), so an edit cannot lose them."""
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    branded = await asyncio.to_thread(
+        video_requirements.brand_delivery, os.path.join(output_dir, filename))
+    filename = os.path.basename(branded)
     if not BILLING_ENABLED:
         return filename
     user = await _user_from_request(request)
     if user is None or user.plan != "free":
         return filename
-    output_dir = os.path.join(OUTPUT_DIR, job_id)
     # Only jobs the pipeline rendered under this scheme (marker file). A job
     # from before it has the mark burned into its canonical, so every
     # derivative already carries one and a copy would stack a second.
@@ -3686,6 +3702,7 @@ async def process_endpoint(
     max_minutes: Optional[str] = Form(None),
     source_start: Optional[str] = Form(None),
     source_end: Optional[str] = Form(None),
+    video_requirements_field: Optional[str] = Form(None, alias="video_requirements"),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
@@ -3720,6 +3737,14 @@ async def process_endpoint(
         max_minutes = body.get("max_minutes")
         source_start = body.get("source_start")
         source_end = body.get("source_end")
+        video_requirements_field = body.get("video_requirements")
+
+    # Campaign rules for this job. Bad input is a 400 before anything is
+    # reserved or downloaded.
+    try:
+        requirements_spec, requirements_logo = video_requirements.parse(video_requirements_field)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid video_requirements: {e}")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -3792,6 +3817,7 @@ async def process_endpoint(
     job_id = str(uuid.uuid4())
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
+    video_requirements.save(job_output_dir, requirements_spec, requirements_logo)
 
     # Prepare Command
     # sys.executable, not "python": bare "python" resolves against PATH, which
@@ -4881,8 +4907,8 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
         "canonical_range": canonical_range,
         "duration": total,
         "current_file": current_file,
-        "has_captions": bool(re.match(r'^subtitled_\d+_',
-                                      watermarked.clean_name(current_file))),
+        "has_captions": bool(re.match(r'^subtitled_\d+_', video_requirements.unbranded_name(
+            watermarked.clean_name(current_file)))),
         "words": words_out,
         "source": {
             "available": bool(source_path),
