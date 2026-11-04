@@ -9,6 +9,7 @@ the values across jobs, because one campaign usually spans several videos.
 | `logo` (PNG/JPEG/WebP data URL), `logo_position`, `logo_width` | code, burned on | always, when the overlay encode succeeds |
 | `link`, `link_on_video` | code, descriptions and optionally burned on | always; a burned link is not clickable |
 | `overlay_text` | code, burned on | always, when the overlay encode succeeds |
+| `cta_text` | code, burned on for the clip's last `CTA_SECONDS` (4 s) | always, when the overlay encode succeeds; empty means none |
 | `description_text` | code, appended to the TikTok and Instagram descriptions | always |
 | `must_include`, `must_avoid` | the model, through the selection prompts | guidance |
 

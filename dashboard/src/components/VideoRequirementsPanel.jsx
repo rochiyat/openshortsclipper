@@ -30,7 +30,7 @@ export default function VideoRequirementsPanel({ value, onChange }) {
     const [open, setOpen] = useState(false);
     const [logoError, setLogoError] = useState('');
     const set = (key, next) => onChange({ ...value, [key]: next });
-    const active = Boolean(value.logo || value.link || value.overlay_text
+    const active = Boolean(value.logo || value.link || value.overlay_text || value.cta_text
         || value.description_text || value.must_include || value.must_avoid);
 
     const pickLogo = async (e) => {
@@ -123,6 +123,21 @@ export default function VideoRequirementsPanel({ value, onChange }) {
                             onChange={(e) => set('overlay_text', e.target.value)}
                             className="input-field"
                         />
+                    </div>
+                    <div>
+                        <p className="eyebrow mb-1.5">call to action at the end</p>
+                        <input
+                            type="text"
+                            maxLength={120}
+                            value={value.cta_text || ''}
+                            onChange={(e) => set('cta_text', e.target.value)}
+                            placeholder="follow for part 2"
+                            aria-label="call to action at the end"
+                            className="input-field"
+                        />
+                        <p className="mt-1 text-[11px] text-muted lowercase">
+                            shown for the last 4 seconds of every clip. leave empty for none.
+                        </p>
                     </div>
                     <div>
                         <p className="eyebrow mb-1.5">required text in description</p>

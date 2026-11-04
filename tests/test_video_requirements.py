@@ -180,6 +180,45 @@ class TestOverlay:
         assert 0 < left and right < 1080 and top >= int(1920 * 0.06)
         assert bottom < 1920 * 0.25
 
+    def test_cta_is_optional(self):
+        assert vr.parse({"cta_text": "   "}) == ({}, None)
+        assert vr.parse({"cta_text": "Follow for part 2"})[0]["cta_text"] == "Follow for part 2"
+        with pytest.raises(ValueError):
+            vr.parse({"cta_text": "x" * 121})
+
+    def test_cta_needs_an_overlay_only_when_filled(self, tmp_path):
+        assert vr.needs_overlay(str(tmp_path), {"cta_text": "Follow"})
+        assert not vr.needs_overlay(str(tmp_path), {"cta_text": "", "must_avoid": "y"})
+
+    def test_cta_card_stays_clear_of_the_hook_seam_and_the_bottom(self):
+        frame = vr.build_cta_overlay("x " * 60, 1080, 1920)
+        left, top, right, bottom = frame.getbbox()
+        assert 0 < left and right < 1080
+        assert top > 1920 * 0.52 and bottom < 1920 * 0.82
+
+    def test_cta_text_never_reaches_the_filtergraph(self):
+        assert vr.overlay_filter() == "[0:v][1:v]overlay=0:0:format=auto"
+        assert "enable='gte(t,6.500)'" in vr.overlay_filter(6.5)
+
+    @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+    def test_cta_shows_only_at_the_end(self, tmp_path):
+        vr.save(str(tmp_path), {"cta_text": "Follow"})
+        final = tmp_path / "t_clip_1.mp4"
+        subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=360x640:d=6",
+                        "-pix_fmt", "yuv420p", str(final)], check=True, capture_output=True)
+        out = vr.brand_delivery(str(final))
+        assert out == str(tmp_path / "brand_t_clip_1.mp4")
+        assert not list(tmp_path.glob(".overlay_*"))
+
+        def brightest_at(seconds):
+            raw = subprocess.run(
+                ["ffmpeg", "-v", "error", "-ss", str(seconds), "-i", out, "-frames:v", "1",
+                 "-f", "rawvideo", "-pix_fmt", "gray", "-"], check=True, capture_output=True).stdout
+            return max(raw)
+
+        assert brightest_at(1) < 60
+        assert brightest_at(5) > 200
+
     def test_no_overlay_means_the_same_file(self, tmp_path):
         final = tmp_path / "t_clip_1.mp4"
         final.write_bytes(b"clip")

@@ -2,9 +2,9 @@
 
 Two kinds of rule, kept apart on purpose:
 
-* Enforced by code, so they always hold: the logo, the link and the required
-  text are burned on (``brand_delivery``), and the link and required description
-  text are appended to the descriptions (``apply_to_descriptions``).
+* Enforced by code, so they always hold: the logo, the link, the required text and
+  the closing call to action are burned on (``brand_delivery``), and the link and
+  required description text are appended to the descriptions (``apply_to_descriptions``).
 * Judged by the model, so they are guidance: must-include and must-avoid material
   goes into the selection prompts (``prompt_block``). The picks read the
   transcript, so visual rules hold far less reliably than spoken ones.
@@ -43,6 +43,7 @@ MAX_LOGO_SIDE = 1024
 
 MAX_LINK_CHARS = 200
 MAX_OVERLAY_CHARS = 120
+MAX_CTA_CHARS = 120
 MAX_DESCRIPTION_CHARS = 500
 MAX_RULE_CHARS = 1000
 
@@ -52,6 +53,11 @@ _MARGIN_X = 0.05
 _MARGIN_TOP = 0.06
 _GAP = 0.012
 _FONT_RATIO = 0.03
+# The closing call to action: on screen for the clip's last seconds, centred under
+# SPLIT's seam captions (mid-frame) and above bottom captions and the platforms' UI.
+CTA_SECONDS = 4.0
+_CTA_CENTER_Y = 0.66
+_CTA_FONT_RATIO = 0.05
 _FONT_CANDIDATES = (
     os.path.join("fonts", "Montserrat-ExtraBold.ttf"),
     "DejaVuSans-Bold.ttf",
@@ -145,6 +151,7 @@ def parse(raw):
         "link": link,
         "link_on_video": bool(raw.get("link_on_video")) and bool(link),
         "overlay_text": _text(raw.get("overlay_text"), MAX_OVERLAY_CHARS, "overlay_text"),
+        "cta_text": _text(raw.get("cta_text"), MAX_CTA_CHARS, "cta_text"),
         "description_text": _text(raw.get("description_text"), MAX_DESCRIPTION_CHARS,
                                   "description_text", multiline=True),
         "must_include": _text(raw.get("must_include"), MAX_RULE_CHARS,
@@ -231,7 +238,7 @@ def needs_overlay(job_dir, spec=None):
     spec = load(job_dir) if spec is None else spec
     if not spec:
         return False
-    return bool(spec.get("overlay_text") or spec.get("link_on_video")
+    return bool(spec.get("overlay_text") or spec.get("link_on_video") or spec.get("cta_text")
                 or os.path.exists(os.path.join(job_dir, LOGO_FILE)))
 
 
@@ -320,6 +327,46 @@ def build_overlay(job_dir, spec, width, height):
     return canvas
 
 
+def build_cta_overlay(text, width, height):
+    """A transparent RGBA frame holding the closing call to action as one card."""
+    from PIL import Image, ImageDraw
+
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    font_size = max(16, int(min(width, height) * _CTA_FONT_RATIO))
+    font = _load_font(font_size)
+    pad_x, pad_y = int(font_size * 0.8), int(font_size * 0.6)
+    lines = _wrap(draw, text, font, width - 2 * (int(width * _MARGIN_X) + pad_x))
+    line_h = int(font_size * 1.3)
+    card_w = int(max(draw.textlength(line, font=font) for line in lines)) + 2 * pad_x
+    card_h = line_h * len(lines) + 2 * pad_y
+    x = (width - card_w) // 2
+    y = int(height * _CTA_CENTER_Y) - card_h // 2
+    draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=int(font_size * 0.5),
+                           fill=(255, 255, 255, 245))
+    for i, line in enumerate(lines):
+        line_x = (width - draw.textlength(line, font=font)) / 2
+        draw.text((line_x, y + pad_y + i * line_h), line, font=font, fill=(15, 23, 42, 255))
+    return canvas
+
+
+def overlay_filter(cta_start=None):
+    """The filtergraph: the always-on overlay, then the CTA from ``cta_start``.
+    Only a number reaches it: all user text is already pixels in the PNGs."""
+    base = "[0:v][1:v]overlay=0:0:format=auto"
+    if cta_start is None:
+        return base
+    return f"{base}[branded];[branded][2:v]overlay=0:0:format=auto:enable='gte(t,{cta_start:.3f})'"
+
+
+def _probe_duration(video_path):
+    return float(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        stderr=subprocess.STDOUT, timeout=60,
+    ).decode().strip())
+
+
 def _probe_size(video_path):
     probe = subprocess.check_output(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -347,12 +394,19 @@ def brand_delivery(final_path):
 
     token = uuid.uuid4().hex[:8]
     overlay_path = os.path.join(job_dir, f".overlay_{token}.png")
+    cta_path = os.path.join(job_dir, f".overlay_cta_{token}.png")
     tmp_path = f"{out_path}.{token}.mp4"
     try:
         from ffmpeg_utils import _X264_ARGS, QUALITY, video_encode_args
 
         width, height = _probe_size(final_path)
         build_overlay(job_dir, spec, width, height).save(overlay_path)
+        inputs = ["-i", final_path, "-i", overlay_path]
+        cta_start = None
+        if spec.get("cta_text"):
+            build_cta_overlay(spec["cta_text"], width, height).save(cta_path)
+            inputs += ["-i", cta_path]
+            cta_start = max(0.0, _probe_duration(final_path) - CTA_SECONDS)
         # NVENC can refuse a session on a busy card. A clip missing its required
         # logo is worth a slower encode, so libx264 gets a turn.
         encoders = [video_encode_args(QUALITY)]
@@ -361,8 +415,8 @@ def brand_delivery(final_path):
         for encoder in encoders:
             # No metadata scrub: the file keeps what it has, including the AI-dub
             # mark that ffmpeg_utils.mark_ai_generated writes on translated clips.
-            cmd = ["ffmpeg", "-y", "-i", final_path, "-i", overlay_path,
-                   "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto",
+            cmd = ["ffmpeg", "-y", *inputs,
+                   "-filter_complex", overlay_filter(cta_start),
                    *encoder, "-c:a", "copy", "-movflags", "+faststart", tmp_path]
             result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                     timeout=1800)
@@ -376,6 +430,6 @@ def brand_delivery(final_path):
               f"({type(e).__name__}: {e})")
         return final_path
     finally:
-        for leftover in (overlay_path, tmp_path):
+        for leftover in (overlay_path, cta_path, tmp_path):
             if os.path.exists(leftover):
                 os.remove(leftover)
