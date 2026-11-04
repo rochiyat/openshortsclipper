@@ -6267,8 +6267,13 @@ class SocialPostRequest(BaseModel):
     description: Optional[str] = None
     scheduled_date: Optional[str] = None # ISO-8601 string
     timezone: Optional[str] = "UTC"
+    provider: str = "upload_post"  # or "browser" (browser_post.py, self-host opt-in)
+    visibility: str = "public"  # browser provider only
+
+from urllib.parse import urlparse
 
 import httpx
+import browser_post
 
 
 def _post_video_blocking(url, headers, data, file_path, filename, timeout):
@@ -6351,8 +6356,65 @@ async def _check_social_post_rate(request):
     times.append(now)
 
 
+def _browser_post_allowed(request: Request) -> bool:
+    """Browser posting acts as the logged-in user with no API key to check, so
+    it answers only to this machine: never on Cloud, never unless switched on,
+    and never from another host or from a web page on another site (the API's
+    self-host CORS is a wildcard)."""
+    if BILLING_ENABLED or not browser_post.enabled():
+        return False
+    local = ("127.0.0.1", "::1", "localhost")
+    if not request.client or request.client.host not in local:
+        return False
+    origin = request.headers.get("origin")
+    return not origin or urlparse(origin).hostname in local
+
+
+@app.get("/api/social/browser/status")
+async def browser_post_status(request: Request):
+    if not _browser_post_allowed(request):
+        return {"enabled": False, "platforms": []}
+    return {"enabled": True, "platforms": browser_post.available_platforms()}
+
+
+async def _post_via_browser(req: SocialPostRequest, request: Request):
+    if not _browser_post_allowed(request):
+        raise HTTPException(status_code=403, detail="Browser posting is not available here")
+    unsupported = [p for p in req.platforms if p not in browser_post.available_platforms()]
+    if unsupported or not req.platforms:
+        raise HTTPException(status_code=400, detail=(
+            f"Browser posting cannot reach: {', '.join(unsupported) or 'no platform selected'}"))
+    if req.scheduled_date:
+        raise HTTPException(status_code=400, detail="Browser posting cannot schedule yet")
+    if req.visibility not in browser_post.VISIBILITIES:
+        raise HTTPException(status_code=400, detail="Invalid visibility")
+
+    await _ensure_job_files(req.job_id, request)
+    clips = ((jobs.get(req.job_id) or {}).get('result') or {}).get('clips')
+    if not clips or not 0 <= req.clip_index < len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip = clips[req.clip_index]
+    filename = clip['video_url'].split('/')[-1]
+    file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title') or 'Viral Short'
+    description = (req.description or clip.get('video_description_for_instagram')
+                   or clip.get('video_description_for_tiktok') or '')
+    request_id = browser_post.start(
+        req.platforms[0], file_path=os.path.abspath(file_path),
+        title=browser_post.clean_text(youtube_title(title), YOUTUBE_TITLE_MAX),
+        description=browser_post.clean_text(description, 5000),
+        visibility=req.visibility,
+    )
+    return {"success": True, "request_id": request_id}
+
+
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest, request: Request):
+    if req.provider == "browser":
+        return await _post_via_browser(req, request)
     await _ensure_job_files(req.job_id, request)
     if req.job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -6465,6 +6527,10 @@ async def social_post_status(request_id: str, request: Request):
     itself can still fail per platform, and the dashboard used to say "Posted
     successfully!" either way.
     """
+    if browser_post.is_browser_request(request_id):
+        if not _browser_post_allowed(request):
+            raise HTTPException(status_code=404, detail="Not found")
+        return browser_post.status(request_id)
     owner = _post_request_owners.get(request_id)
     if owner is None:
         return {"status": "unknown"}
