@@ -1,11 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { Loader2, Plus, Pencil, Archive, ArchiveRestore, Users } from 'lucide-react';
+import { Loader2, Plus, Pencil, Archive, ArchiveRestore, Users, Link2, Unlink, AlertTriangle } from 'lucide-react';
 import Modal from '../components/ui/Modal';
-import { listChannels, createChannel, updateChannel, PLATFORMS } from './api';
+import {
+  listChannels, createChannel, updateChannel, PLATFORMS, PUBLISHERS, publisherAvailability,
+  youtubeConnectUrl, youtubeDisconnect,
+} from './api';
+
+const UPLOAD_POST_PLATFORMS = ['tiktok', 'instagram', 'youtube'];
 
 const EMPTY = {
   name: '', platform: 'tiktok', handle: '', language: '', watermark_text: '',
-  default_hashtags: '', caption_suffix: '',
+  default_hashtags: '', caption_suffix: '', publisher: 'manual', profile: '', privacy: 'public',
 };
 
 const toForm = (c) => ({
@@ -13,6 +18,9 @@ const toForm = (c) => ({
   watermark_text: c.watermark_text || '',
   default_hashtags: c.caption_preset?.default_hashtags || '',
   caption_suffix: c.caption_preset?.caption_suffix || '',
+  publisher: c.publisher || 'manual',
+  profile: c.publisher_config?.profile || '',
+  privacy: c.publisher_config?.privacy || 'public',
 });
 
 const toBody = (f) => ({
@@ -22,7 +30,11 @@ const toBody = (f) => ({
   language: f.language || null,
   watermark_text: f.watermark_text || null,
   caption_preset: { default_hashtags: f.default_hashtags, caption_suffix: f.caption_suffix },
+  publisher: f.publisher,
+  publisher_config: { profile: f.profile || null, privacy: f.privacy },
 });
+
+const publisherLabel = (v) => PUBLISHERS.find((p) => p.value === v)?.label.split(' (')[0] || v;
 
 // The user's own accounts. Posting (phase 3) records which channel a clip
 // went to; the preset is the default copy added when posting there.
@@ -31,6 +43,41 @@ export default function ChannelsPage() {
   const [showArchived, setShowArchived] = useState(false);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
+  const [avail, setAvail] = useState(null);
+  const [connecting, setConnecting] = useState('');
+
+  useEffect(() => {
+    publisherAvailability().then(setAvail).catch(() => {});
+  }, []);
+
+  // The consent page posts back when it is done; reload to show "connected".
+  useEffect(() => {
+    const onMsg = (e) => { if (e.data?.studio === 'youtube-connected') { setConnecting(''); load(); } };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  });
+
+  const connect = async (c) => {
+    setError('');
+    setConnecting(c.id);
+    try {
+      const { url } = await youtubeConnectUrl(c.id);
+      window.open(url, 'studio-youtube-connect', 'width=520,height=720');
+    } catch (e) {
+      setError(e?.detail || 'could not start the YouTube connection.');
+      setConnecting('');
+    }
+  };
+
+  const disconnect = async (c) => {
+    if (!window.confirm(`Disconnect ${c.name} from YouTube? Queued uploads to it will fail until you connect again.`)) return;
+    try {
+      await youtubeDisconnect(c.id);
+      load();
+    } catch (e) {
+      setError(e?.detail || 'could not disconnect.');
+    }
+  };
 
   const load = () => {
     listChannels(showArchived)
@@ -82,11 +129,34 @@ export default function ChannelsPage() {
                   {c.platform}{c.handle && ` · @${c.handle}`}{c.language && ` · ${c.language}`}
                 </p>
               </div>
-              <span className="badge-brass">{c.publisher}</span>
+              <span className="badge-brass">{publisherLabel(c.publisher)}</span>
             </div>
             {c.caption_preset?.default_hashtags && <p className="text-xs text-ink2 mt-2 break-words">{c.caption_preset.default_hashtags}</p>}
             {c.caption_preset?.caption_suffix && <p className="text-xs text-muted mt-1 break-words line-clamp-2">{c.caption_preset.caption_suffix}</p>}
             {c.watermark_text && <p className="readout mt-1">watermark: {c.watermark_text}</p>}
+            {c.publisher === 'uploadpost' && (
+              <p className="readout mt-1">
+                upload-post profile: {c.publisher_config?.profile || <span className="text-danger">not set</span>}
+                {avail && !avail.uploadpost.configured && <span className="text-danger"> · server key missing</span>}
+              </p>
+            )}
+            {c.publisher === 'youtube_api' && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span className={c.youtube_connected ? 'badge-ok' : 'badge-brass'}>
+                  {c.youtube_connected
+                    ? `connected${c.publisher_config?.youtube_channel_title ? ` · ${c.publisher_config.youtube_channel_title}` : ''}`
+                    : 'not connected'}
+                </span>
+                <span className="readout">{c.publisher_config?.privacy || 'public'}</span>
+                {!c.archived && (c.youtube_connected
+                  ? <button onClick={() => disconnect(c)} className="btn-ghost px-2 py-1 text-xs"><Unlink size={12} /> disconnect</button>
+                  : <button onClick={() => connect(c)} disabled={avail && !avail.youtube_api.configured}
+                      className="btn-primary px-2 py-1 text-xs"
+                      title={avail && !avail.youtube_api.configured ? `Set ${avail.youtube_api.needs} on the server` : 'Sign in with Google'}>
+                      {connecting === c.id ? <Loader2 size={12} className="animate-spin" /> : <Link2 size={12} />} connect youtube
+                    </button>)}
+              </div>
+            )}
             <div className="flex gap-2 mt-3">
               <button onClick={() => setEditing(c)} className="btn-ghost px-3 py-2 text-xs"><Pencil size={14} /> edit</button>
               <button onClick={() => toggleArchive(c)} className="btn-ghost px-3 py-2 text-xs">
@@ -100,6 +170,7 @@ export default function ChannelsPage() {
       {editing && (
         <ChannelForm
           channel={editing === 'new' ? null : editing}
+          avail={avail}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }}
         />
@@ -108,7 +179,7 @@ export default function ChannelsPage() {
   );
 }
 
-function ChannelForm({ channel, onClose, onSaved }) {
+function ChannelForm({ channel, avail, onClose, onSaved }) {
   const [form, setForm] = useState(channel ? toForm(channel) : EMPTY);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -153,6 +224,44 @@ function ChannelForm({ channel, onClose, onSaved }) {
           {input('watermark_text', 'watermark text', { maxLength: 120 })}
         </div>
         {input('default_hashtags', 'default hashtags', { maxLength: 2000, placeholder: '#fyp #belajar' })}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="block">
+            <span className="readout block mb-1">publisher</span>
+            <select value={form.publisher} onChange={set('publisher')} className="input-field w-full text-sm">
+              {PUBLISHERS.map((p) => (
+                <option key={p.value} value={p.value}
+                  disabled={(p.value === 'youtube_api' && form.platform !== 'youtube')
+                    || (p.value === 'uploadpost' && !UPLOAD_POST_PLATFORMS.includes(form.platform))}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {form.publisher === 'uploadpost' && input('profile', 'upload-post profile', { maxLength: 120, placeholder: 'profile username' })}
+          {form.publisher === 'youtube_api' && (
+            <label className="block">
+              <span className="readout block mb-1">upload as</span>
+              <select value={form.privacy} onChange={set('privacy')} className="input-field w-full text-sm">
+                <option value="public">public</option>
+                <option value="unlisted">unlisted</option>
+                <option value="private">private</option>
+              </select>
+            </label>
+          )}
+        </div>
+        {form.publisher === 'youtube_api' && (
+          <p className="text-xs text-muted flex gap-1.5">
+            <AlertTriangle size={14} className="text-brass shrink-0 mt-0.5" />
+            <span>
+              Google keeps videos uploaded by an unaudited API project private. Until your project passes
+              YouTube&apos;s audit, switch each upload to public in YouTube Studio.
+              {avail && !avail.youtube_api.configured && <> Server setup missing: {avail.youtube_api.needs}.</>}
+            </span>
+          </p>
+        )}
+        {form.publisher === 'uploadpost' && avail && !avail.uploadpost.configured && (
+          <p className="text-xs text-danger">Server setup missing: {avail.uploadpost.needs}.</p>
+        )}
         <label className="block">
           <span className="readout block mb-1">caption suffix (cta)</span>
           <textarea value={form.caption_suffix} onChange={set('caption_suffix')} rows={2} maxLength={2000}

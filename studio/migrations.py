@@ -142,6 +142,32 @@ MIGRATIONS = [
         "CREATE INDEX ix_posts_sha ON posts(file_sha256, channel_id)",
         "CREATE INDEX ix_snapshots_post ON view_snapshots(post_id, captured_at DESC)",
     ]),
+    (4, [
+        # Every automatic publish goes through this queue, "now" included, so
+        # one worker owns retries and a restart never loses a scheduled post.
+        """
+        CREATE TABLE publish_jobs (
+            id               TEXT PRIMARY KEY,
+            clip_id          TEXT REFERENCES clips(id) ON DELETE SET NULL,
+            channel_id       TEXT NOT NULL REFERENCES channels(id),
+            campaign_id      TEXT REFERENCES campaigns(id) ON DELETE SET NULL,
+            publisher        TEXT NOT NULL,
+            title            TEXT,
+            description      TEXT,
+            scheduled_at     TEXT NOT NULL,
+            status           TEXT NOT NULL DEFAULT 'queued',
+            attempts         INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at  TEXT,
+            request_id       TEXT,
+            post_id          TEXT REFERENCES posts(id) ON DELETE SET NULL,
+            last_error       TEXT,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX ix_publish_jobs_due ON publish_jobs(status, scheduled_at)",
+        "CREATE INDEX ix_publish_jobs_clip ON publish_jobs(clip_id, channel_id)",
+    ]),
 ]
 
 LATEST = MIGRATIONS[-1][0]

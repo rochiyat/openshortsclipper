@@ -2,13 +2,17 @@
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+import html
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from . import catalog, db, posts, projects, review, scheduler, storage
-from .models import Clip, Post, Project
+from . import (catalog, db, posts, projects, publishers, publishing, review, scheduler,
+               storage, youtube_oauth)
+from .models import Clip, Post, Project, PublishJob, now_iso
 from .projects import JobBridge, StudioError
 
 router = APIRouter(prefix="/api/studio", tags=["studio"])
@@ -120,6 +124,7 @@ class ChannelRequest(BaseModel):
     caption_preset: Optional[dict] = None
     watermark_text: Optional[str] = None
     publisher: Optional[str] = None
+    publisher_config: Optional[dict] = None
     archived: Optional[bool] = None
 
 
@@ -353,6 +358,7 @@ class CreatePostRequest(BaseModel):
 
 
 class UpdatePostRequest(BaseModel):
+    url: Optional[str] = None
     status: Optional[str] = None
     claim_status: Optional[str] = None
     submitted_to_campaign_at: Optional[str] = None
@@ -457,6 +463,8 @@ def refresh_post(post_id: str, s: Session = Depends(db.get_session)):
         p = posts.get_post(s, post_id)
     except StudioError as e:
         _raise(e)
+    if not p.url:
+        raise HTTPException(status_code=409, detail="Attach the post's URL first")
     s.commit()
     summary = scheduler.run_once([p.id])
     if summary is None:
@@ -490,3 +498,180 @@ def campaign_report(campaign_id: str, s: Session = Depends(db.get_session)):
 def export_posts_csv(s: Session = Depends(db.get_session)):
     return Response(posts.export_csv(s), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": 'attachment; filename="studio-posts.csv"'})
+
+
+# ---- publishing ---------------------------------------------------------------------
+
+class PublishRequestBody(BaseModel):
+    clip_id: str
+    channel_id: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    scheduled_at: Optional[str] = None
+    campaign_id: Optional[str] = None
+    force: bool = False
+
+
+class UpdatePublishJobRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    scheduled_at: Optional[str] = None
+
+
+def _job_out(j: PublishJob) -> dict:
+    return {
+        "id": j.id, "publisher": j.publisher, "status": j.status,
+        "title": j.title, "description": j.description,
+        "scheduled_at": j.scheduled_at, "attempts": j.attempts,
+        "next_attempt_at": j.next_attempt_at, "last_error": j.last_error,
+        "post_id": j.post_id, "created_at": j.created_at, "updated_at": j.updated_at,
+        "channel": {"id": j.channel.id, "name": j.channel.name, "platform": j.channel.platform}
+        if j.channel else None,
+        "campaign": {"id": j.campaign.id, "name": j.campaign.name} if j.campaign else None,
+        "clip": {"id": j.clip.id, "title": j.clip.title,
+                 "video_url": _media_url(j.clip.project_id, j.clip.file_name)} if j.clip else None,
+    }
+
+
+@router.get("/publishers")
+def publisher_availability():
+    return publishers.availability()
+
+
+@router.get("/publish/preview")
+def publish_preview(clip_id: str, channel_id: str, s: Session = Depends(db.get_session)):
+    """The title and description a publish would use, for the form to prefill."""
+    try:
+        clip = review.get_clip(s, clip_id)
+        channel = catalog.get_channel(s, channel_id)
+    except StudioError as e:
+        _raise(e)
+    title, description = publishing.compose_copy(clip, channel)
+    return {"title": title, "description": description}
+
+
+@router.post("/publish")
+def publish(req: PublishRequestBody, s: Session = Depends(db.get_session)):
+    try:
+        job = publishing.enqueue(s, _sent(req, exclude=("force",)), force=req.force)
+    except StudioError as e:
+        _raise(e)
+    out = _job_out(job)
+    s.commit()
+    if job.scheduled_at <= now_iso():
+        scheduler.kick_publisher()
+    return {"job": out}
+
+
+@router.get("/publish/jobs")
+def publish_jobs(status: str = "", s: Session = Depends(db.get_session)):
+    statuses = [x for x in status.split(",") if x] or None
+    return {"jobs": [_job_out(j) for j in publishing.list_jobs(s, statuses)]}
+
+
+@router.patch("/publish/jobs/{job_id}")
+def update_publish_job(job_id: str, req: UpdatePublishJobRequest, s: Session = Depends(db.get_session)):
+    try:
+        job = publishing.get_job(s, job_id)
+        publishing.update_job(job, _sent(req))
+    except StudioError as e:
+        _raise(e)
+    return {"job": _job_out(job)}
+
+
+@router.post("/publish/jobs/{job_id}/cancel")
+def cancel_publish_job(job_id: str, s: Session = Depends(db.get_session)):
+    try:
+        job = publishing.get_job(s, job_id)
+        publishing.cancel(job)
+    except StudioError as e:
+        _raise(e)
+    return {"job": _job_out(job)}
+
+
+@router.post("/publish/jobs/{job_id}/retry")
+def retry_publish_job(job_id: str, s: Session = Depends(db.get_session)):
+    try:
+        job = publishing.get_job(s, job_id)
+        publishing.retry(job)
+    except StudioError as e:
+        _raise(e)
+    out = _job_out(job)
+    s.commit()
+    scheduler.kick_publisher()
+    return {"job": out}
+
+
+# ---- YouTube connect (OAuth) -------------------------------------------------------
+
+def _origin(value: str) -> Optional[str]:
+    """scheme://host[:port] of a dashboard origin, or None."""
+    parsed = urlparse(value or "")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.path not in ("", "/"):
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+@router.get("/youtube/connect")
+def youtube_connect(channel_id: str, request: Request, origin: str = "",
+                    s: Session = Depends(db.get_session)):
+    """The Google consent URL. ``origin`` is the dashboard's own origin, so the
+    redirect works behind the dev proxy; it must match a redirect URI you
+    registered in Google Cloud (STUDIO_YOUTUBE_REDIRECT_URI overrides it)."""
+    try:
+        channel = catalog.get_channel(s, channel_id)
+    except StudioError as e:
+        _raise(e)
+    if channel.publisher != "youtube_api" or channel.platform != "youtube":
+        raise HTTPException(status_code=400, detail="Set this channel's publisher to 'youtube direct' first")
+    base = _origin(origin) or str(request.base_url)
+    try:
+        url = youtube_oauth.start(channel.id, youtube_oauth.redirect_uri(base))
+    except youtube_oauth.OAuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"url": url, "redirect_uri": youtube_oauth.redirect_uri(base)}
+
+
+def _oauth_page(title: str, message: str, ok: bool) -> HTMLResponse:
+    color = "#3fb68b" if ok else "#e5534b"
+    body = f"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(title)}</title>
+<body style="font-family:system-ui,sans-serif;background:#0b0d10;color:#e8e6e1;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px">
+<main style="max-width:420px;text-align:center"><h1 style="font-size:20px;color:{color}">{html.escape(title)}</h1>
+<p style="line-height:1.5">{html.escape(message)}</p><p style="opacity:.7">You can close this tab and return to OpenShorts.</p></main>
+<script>try{{window.opener&&window.opener.postMessage({{studio:'youtube-connected',ok:{str(ok).lower()}}},'*')}}catch(e){{}}</script>"""
+    return HTMLResponse(body, status_code=200 if ok else 400)
+
+
+@router.get("/youtube/callback")
+def youtube_callback(state: str = "", code: str = "", error: str = ""):
+    if error:
+        return _oauth_page("YouTube not connected", f"Google answered: {error[:100]}", False)
+    try:
+        channel_id = youtube_oauth.finish(state, code)
+    except youtube_oauth.OAuthError as e:
+        return _oauth_page("YouTube not connected", str(e), False)
+    title = None
+    try:
+        info = youtube_oauth.my_channel(channel_id)
+        title = info.get("title")
+        with db.session() as s:
+            ch = catalog.get_channel(s, channel_id)
+            cfg = ch.publisher_cfg
+            cfg.update({"youtube_channel_id": info.get("id"), "youtube_channel_title": title})
+            import json as _json
+            ch.publisher_config = _json.dumps(cfg, ensure_ascii=False)
+    except (youtube_oauth.OAuthError, StudioError) as e:
+        print(f"⚠️ Studio YouTube channel lookup: {e}")
+    return _oauth_page("YouTube connected",
+                       f"Uploads will go to {title}." if title else "Uploads are ready.", True)
+
+
+@router.post("/channels/{channel_id}/youtube/disconnect")
+def youtube_disconnect(channel_id: str, s: Session = Depends(db.get_session)):
+    try:
+        ch = catalog.get_channel(s, channel_id)
+    except StudioError as e:
+        _raise(e)
+    youtube_oauth.disconnect(ch.id)
+    return {"channel": catalog.channel_out(ch)}

@@ -18,6 +18,8 @@ from .models import Setting, now_iso
 
 _LAST_RUN_KEY = "snapshots.last_run"
 _task: Optional[asyncio.Task] = None
+_publish_task: Optional[asyncio.Task] = None
+PUBLISH_TICK_SECONDS = 30
 _lock = threading.Lock()
 _state = {"running": False, "last_summary": None}
 
@@ -144,9 +146,31 @@ async def _loop():
             await asyncio.sleep(300)
 
 
+async def _publish_loop():
+    from . import publishing
+    await asyncio.to_thread(publishing.recover_interrupted)
+    while True:
+        try:
+            await asyncio.to_thread(publishing.tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — keep the queue alive
+            print(f"⚠️ Studio publish loop: {type(e).__name__}: {e}")
+        await asyncio.sleep(PUBLISH_TICK_SECONDS)
+
+
+def kick_publisher():
+    """Process due publish jobs now, off the request thread."""
+    from . import publishing
+    threading.Thread(target=publishing.tick, name="studio-publish", daemon=True).start()
+
+
 def start():
-    """Start the daily loop once per process (called from the app lifespan)."""
-    global _task
-    if not enabled() or (_task is not None and not _task.done()):
-        return
-    _task = asyncio.get_running_loop().create_task(_loop())
+    """Start the daily snapshot loop and the publish queue once per process
+    (called from the app lifespan)."""
+    global _task, _publish_task
+    loop = asyncio.get_running_loop()
+    if _publish_task is None or _publish_task.done():
+        _publish_task = loop.create_task(_publish_loop())
+    if enabled() and (_task is None or _task.done()):
+        _task = loop.create_task(_loop())

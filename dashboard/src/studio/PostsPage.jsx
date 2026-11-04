@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Loader2, Plus, RefreshCw, Download, ExternalLink, Trash2, ChevronDown, ChevronUp, Send, AlertTriangle,
+  Clock, RotateCcw, X, Link2,
 } from 'lucide-react';
 import RecordPostModal from './RecordPostModal';
 import ViewsChart from './ViewsChart';
 import {
   listPosts, listChannels, listCampaigns, updatePost, deletePost, refreshPost, postSnapshots, addSnapshot,
   snapshotStatus, runSnapshots, exportPostsUrl, CLAIM_STATUSES, formatCount, formatMoney, formatDate,
+  listPublishJobs, cancelPublishJob, retryPublishJob,
 } from './api';
 
 const fmtWhen = (iso) => (iso ? new Date(iso).toLocaleString(undefined, {
@@ -90,6 +92,8 @@ export default function PostsPage() {
         </p>
       )}
 
+      <PublishQueue onPublished={load} />
+
       <div className="flex flex-wrap gap-2 mb-4">
         <select value={filters.channelId} onChange={(e) => setFilters((f) => ({ ...f, channelId: e.target.value }))}
           className="input-field w-full sm:w-auto text-xs py-2" aria-label="Filter by channel">
@@ -106,6 +110,7 @@ export default function PostsPage() {
           className="input-field w-full sm:w-auto text-xs py-2" aria-label="Filter by status">
           <option value="">any status</option>
           <option value="live">live</option>
+          <option value="pending">pending (no url)</option>
           <option value="removed">removed</option>
         </select>
         {data && data.posts.length > 0 && (
@@ -121,7 +126,7 @@ export default function PostsPage() {
       {data && data.posts.length === 0 && (
         <div className="text-center py-20 text-muted">
           <Send size={40} className="mx-auto mb-4 text-muted" />
-          <p className="lowercase">no posts yet. Publish an approved clip, then “record post” with its URL.</p>
+          <p className="lowercase">no posts yet. Use “publish” on an approved clip in review, or “record post” for one you uploaded yourself.</p>
         </div>
       )}
 
@@ -135,6 +140,105 @@ export default function PostsPage() {
         <RecordPostModal onClose={() => setRecording(false)} onSaved={() => { setRecording(false); load(); }} />
       )}
     </div>
+  );
+}
+
+const JOB_BADGE = {
+  queued: 'badge-brass', running: 'badge-brass', awaiting: 'badge-brass', failed: 'badge-danger',
+};
+
+// Automatic publishes waiting, running or failed. Polls while anything moves.
+function PublishQueue({ onPublished }) {
+  const [jobs, setJobs] = useState([]);
+  const [error, setError] = useState('');
+
+  const load = useCallback(() => {
+    listPublishJobs('queued,running,awaiting,failed')
+      .then((d) => {
+        setJobs((prev) => {
+          const moving = (list) => list.filter((j) => j.status !== 'failed').length;
+          if (moving(prev) > moving(d.jobs)) onPublished?.();
+          return d.jobs;
+        });
+      })
+      .catch(() => {});
+  }, [onPublished]);
+
+  useEffect(() => { load(); }, [load]);
+  const busy = jobs.some((j) => ['queued', 'running', 'awaiting'].includes(j.status));
+  useEffect(() => {
+    if (!busy) return undefined;
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, [busy, load]);
+
+  if (jobs.length === 0) return null;
+  const act = async (fn) => {
+    setError('');
+    try { await fn(); load(); } catch (e) { setError(e?.detail || 'that did not work.'); }
+  };
+  return (
+    <div className="card p-3 mb-4">
+      <p className="readout mb-2">publish queue</p>
+      <div className="space-y-2">
+        {jobs.map((j) => (
+          <div key={j.id} className="flex flex-col sm:flex-row sm:items-center gap-2 text-sm">
+            <span className={`${JOB_BADGE[j.status] || 'badge-brass'} self-start sm:self-auto`}>{j.status}</span>
+            <div className="min-w-0 flex-1">
+              <p className="text-ink truncate">{j.clip?.title || j.title}</p>
+              <p className="readout truncate">
+                {j.channel?.name} · {j.channel?.platform}
+                {j.status === 'queued' && <> · <Clock size={10} className="inline" /> {new Date(j.next_attempt_at || j.scheduled_at).toLocaleString()}</>}
+                {j.attempts > 0 && ` · attempt ${j.attempts}`}
+              </p>
+              {j.last_error && <p className="text-xs text-muted truncate" title={j.last_error}>{j.last_error}</p>}
+            </div>
+            <div className="flex gap-2 shrink-0">
+              {j.status === 'failed' && (
+                <button onClick={() => act(() => retryPublishJob(j.id))} className="btn-ghost px-3 py-1.5 text-xs">
+                  <RotateCcw size={12} /> retry
+                </button>
+              )}
+              {['queued', 'failed'].includes(j.status) && (
+                <button onClick={() => act(() => cancelPublishJob(j.id))} className="btn-ghost px-3 py-1.5 text-xs">
+                  <X size={12} /> {j.status === 'failed' ? 'dismiss' : 'cancel'}
+                </button>
+              )}
+              {['running', 'awaiting'].includes(j.status) && <Loader2 size={14} className="animate-spin text-brass" />}
+            </div>
+          </div>
+        ))}
+      </div>
+      {error && <p className="text-danger text-xs mt-2">{error}</p>}
+    </div>
+  );
+}
+
+function AttachUrl({ post, onChange }) {
+  const [url, setUrl] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  return (
+    <form
+      className="flex flex-col sm:flex-row gap-2 mt-2"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setSaving(true);
+        setError('');
+        try {
+          onChange((await updatePost(post.id, { url })).post);
+        } catch (err) {
+          setError(err?.detail || 'could not attach the URL.');
+        } finally {
+          setSaving(false);
+        }
+      }}
+    >
+      <input type="url" required value={url} onChange={(e) => setUrl(e.target.value)}
+        placeholder={`paste the ${post.platform} post url once it is public`} className="input-field text-xs py-1.5 flex-1" />
+      <button type="submit" disabled={saving} className="btn-ghost px-3 py-1.5 text-xs"><Link2 size={12} /> attach</button>
+      {error && <p className="text-danger text-xs sm:self-center">{error}</p>}
+    </form>
   );
 }
 
@@ -176,6 +280,7 @@ function PostRow({ post, onChange, onDelete }) {
             {post.campaign && ` · ${post.campaign.name}`}
             {post.status !== 'live' && ` · ${post.status}`}
           </p>
+          {post.status === 'pending' && <AttachUrl post={post} onChange={onChange} />}
           {post.last_error && post.status === 'live' && (
             <p className="text-xs text-muted mt-0.5 truncate" title={post.last_error}>
               <AlertTriangle size={12} className="inline text-brass mr-1" />last read failed: {post.last_error}
@@ -209,13 +314,17 @@ function PostRow({ post, onChange, onDelete }) {
             {s.comments != null && ` · ${formatCount(s.comments)} comments`}
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            <a href={post.url} target="_blank" rel="noopener noreferrer" className="btn-ghost px-3 py-2 text-xs">
-              <ExternalLink size={14} /> open
-            </a>
-            <button onClick={() => act('refresh', async () => onChange((await refreshPost(post.id)).post))}
-              disabled={!!busy} className="btn-ghost px-3 py-2 text-xs">
-              <RefreshCw size={14} className={busy === 'refresh' ? 'animate-spin' : ''} /> read views now
-            </button>
+            {post.url && (
+              <a href={post.url} target="_blank" rel="noopener noreferrer" className="btn-ghost px-3 py-2 text-xs">
+                <ExternalLink size={14} /> open
+              </a>
+            )}
+            {post.status === 'live' && (
+              <button onClick={() => act('refresh', async () => onChange((await refreshPost(post.id)).post))}
+                disabled={!!busy} className="btn-ghost px-3 py-2 text-xs">
+                <RefreshCw size={14} className={busy === 'refresh' ? 'animate-spin' : ''} /> read views now
+              </button>
+            )}
             {post.campaign && (
               <label className="flex items-center gap-1.5 text-xs text-muted lowercase">
                 claim

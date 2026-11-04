@@ -1,6 +1,6 @@
 # Studio: rencana fitur project, posting & views (self-host)
 
-Status: Fase 0–3 selesai (Fase 3: YouTube diprioritaskan) · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
+Status: Fase 0–4 selesai (YouTube diprioritaskan) · Target: mode self-host (`BILLING_ENABLED` tidak aktif)
 
 ## 1. Tujuan
 
@@ -92,6 +92,10 @@ tests/
 | `STUDIO_SNAPSHOT_AT` | `23:50` | Jam pembacaan harian (HH:MM) |
 | `STUDIO_TZ` | `Asia/Jakarta` | Zona waktu jadwal; nama IANA atau offset seperti `+07:00`. Tanpa tzdata jatuh ke UTC+7 |
 | `STUDIO_TRACK_DAYS` | `90` | Post lebih tua dari ini tidak dibaca lagi otomatis |
+| `STUDIO_YOUTUBE_CLIENT_ID` / `STUDIO_YOUTUBE_CLIENT_SECRET` | kosong | OAuth client (tipe *Web application*) dari Google Cloud project kamu, untuk publisher **youtube direct** |
+| `STUDIO_YOUTUBE_REDIRECT_URI` | otomatis | Paksa redirect URI OAuth; default `<origin dashboard>/api/studio/youtube/callback` |
+| `UPLOAD_POST_API_KEY` | kosong | Key Upload-Post di server. Wajib untuk publisher **upload-post** di Studio: antrean jalan di server, jadi key yang hanya tersimpan di browser tidak bisa dipakai |
+| `TIKTOK_POST_MODE` | `MEDIA_UPLOAD` | Sama dengan pipeline utama: TikTok lewat Upload-Post masuk ke draft (post `pending` sampai URL ditempel) |
 
 Hardlink hanya jalan bila `studio_data/` dan `output/` ada di mount yang sama. Linux menolak hardlink antar mount point (EXDEV), termasuk dua bind mount dari disk yang sama. Di `docker-compose.yml` bawaan keduanya mount terpisah, jadi Studio otomatis **menyalin** file. Hasilnya tetap benar, hanya pakai disk dua kali selama job asli belum dihapus cleanup.
 
@@ -256,12 +260,24 @@ Estimasi untuk 1 developer, sudah termasuk test.
 
 **Selesai bila**: 3 URL nyata (YouTube, TikTok, Instagram) tercatat, snapshot otomatis masuk dua malam berturut-turut, grafik dan CSV benar.
 
-### Fase 4 — Publish otomatis lewat adapter (3–5 hari, opsional)
+### Fase 4 — Publish otomatis lewat adapter (3–5 hari, opsional) ✅
 
-- [ ] `PublisherAdapter.publish(clip, channel, caption) -> PublishResult(external_id?, url?, request_id?)`.
-- [ ] `uploadpost.py`: membungkus alur `/api/social/post` yang sudah ada, lalu menulis row `posts` dan polling `post-status` untuk mengisi URL.
-- [ ] `youtube.py` (opsional): OAuth desktop, `videos.insert` + `videos.list` untuk metrics. Token disimpan terenkripsi atau di file di luar repo, tidak pernah di DB polos.
-- [ ] Jadwal posting per channel (pakai `/api/social/scheduled` bila lewat Upload-Post).
+- [x] Migrasi 4: tabel `publish_jobs`. Semua publish otomatis lewat antrean ini, termasuk "sekarang", supaya satu worker memegang retry dan jadwal tidak hilang saat restart.
+- [x] `studio/publishers.py`: adapter `youtube_api` (upload resumable langsung ke YouTube Data API, privacy per channel, judul dipotong di batas kata ≤100) dan `uploadpost` (TikTok/Instagram/YouTube, async + polling status). Semua request di `ssrf_guard.guarded()`; pesan error vendor tidak pernah menyertakan body/key.
+- [x] `studio/youtube_oauth.py`: connect channel lewat Google OAuth (state sekali pakai, 15 menit), refresh token di `STUDIO_DIR/secrets/youtube-<id>.json` mode 0600, tidak pernah di DB atau respons API. Access token di-refresh otomatis.
+- [x] `studio/publishing.py`: antrean dengan jadwal (`scheduled_at` wajib ber-zona waktu, maks 180 hari), retry otomatis untuk error sementara (429/5xx/kuota/jaringan; 3 percobaan, jeda 10/20 menit), gagal permanen untuk error yang harus diperbaiki (auth, profil, metadata). Pengaman sama dengan record post (clip belum approved, file sama di channel sama) plus tolak antrean ganda. Job yang terputus saat upload (restart) **tidak** diulang otomatis supaya tidak double post.
+- [x] Hasil publish otomatis membuat row `posts` (clip jadi `posted`, campaign ikut project). Bila vendor tidak memberi URL publik (draft TikTok), post berstatus `pending`, tidak dibaca views-nya, sampai URL ditempel (`PATCH /posts/{id} {url}`).
+- [x] Dashboard: pengaturan publisher di Channels (profil Upload-Post, privacy + tombol **connect youtube**), tombol **publish** (sekarang / jadwal, judul & caption bisa diedit, prefill dari caption + hashtag + CTA channel) di review queue, panel **publish queue** di Posts (cancel/retry), kolom attach URL untuk post `pending`.
+- [ ] Fetcher analytics Upload-Post: tidak dibuat. Post hasil publish sudah punya URL dan dibaca lewat YouTube API / yt-dlp seperti post manual. Dokumentasi Upload-Post juga tidak bisa diakses dari sandbox pengembangan, jadi URL dari respons status dicari secara defensif (URL apa pun di payload yang cocok dengan platformnya).
+
+**Setup YouTube direct (sekali):**
+1. Google Cloud Console → buat project → aktifkan **YouTube Data API v3**.
+2. OAuth consent screen: tipe *External*, tambahkan akun Google kamu sebagai *test user*.
+3. Credentials → *OAuth client ID* → *Web application* → Authorized redirect URI: `http://localhost:5175/api/studio/youtube/callback` (sesuaikan host/port dashboard kamu).
+4. Isi `STUDIO_YOUTUBE_CLIENT_ID` dan `STUDIO_YOUTUBE_CLIENT_SECRET` di `.env`, restart.
+5. Channels → channel YouTube → publisher **youtube direct** → **connect youtube**.
+
+Batasan Google: video yang diupload lewat API project yang belum lolos audit YouTube dikunci **private**. Sampai project kamu diaudit, ubah ke public sendiri di YouTube Studio setelah upload. Kuota default 10.000 unit/hari dan satu upload memakan sekitar 1.600 unit, jadi cukup sekitar 6 upload per hari.
 
 Catatan batasan platform (cek dokumentasi terbaru sebelum mulai): kuota YouTube Data API per upload besar; TikTok Content Posting API untuk app yang belum diaudit umumnya hanya bisa posting private; Instagram/Threads butuh akun Business/Creator + app review Meta. Karena itu adapter `manual` tetap jadi jalur utama.
 

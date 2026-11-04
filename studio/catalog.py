@@ -64,11 +64,20 @@ def _number(value, field, minimum=0.0, maximum=None, integer=False):
 
 # ---- channels ---------------------------------------------------------------
 
+def _youtube_connected(c: Channel) -> bool:
+    if c.publisher != "youtube_api":
+        return False
+    from . import youtube_oauth
+    return youtube_oauth.is_connected(c.id)
+
+
 def channel_out(c: Channel) -> dict:
     return {
         "id": c.id, "name": c.name, "platform": c.platform, "handle": c.handle,
         "language": c.language, "caption_preset": c.preset,
         "watermark_text": c.watermark_text, "publisher": c.publisher,
+        "publisher_config": c.publisher_cfg,
+        "youtube_connected": _youtube_connected(c),
         "archived": c.archived_at is not None,
         "created_at": c.created_at, "updated_at": c.updated_at,
     }
@@ -103,8 +112,34 @@ def _apply_channel(c: Channel, data: dict, creating: bool):
         if publisher not in PUBLISHERS:
             raise StudioError(f"publisher must be one of: {', '.join(PUBLISHERS)}")
         c.publisher = publisher
+    if "publisher_config" in data:
+        c.publisher_config = json.dumps(_publisher_config(c, data.get("publisher_config") or {}),
+                                        ensure_ascii=False)
     if "archived" in data:
         c.archived_at = (c.archived_at or now_iso()) if data.get("archived") else None
+
+
+_PRIVACY = ("public", "unlisted", "private")
+
+
+def _publisher_config(c: Channel, cfg) -> dict:
+    """Merge the user-editable, non-secret publisher settings into the stored
+    config. OAuth results (youtube_channel_*) are written by the connect flow
+    only; tokens never live here."""
+    if not isinstance(cfg, dict):
+        raise StudioError("publisher_config must be an object")
+    out = dict(c.publisher_cfg)
+    if "profile" in cfg:
+        profile = _text(cfg.get("profile"), 120, "profile")
+        if profile and not re.fullmatch(r"[A-Za-z0-9_.@-]+", profile):
+            raise StudioError("profile may contain letters, digits, . _ - @ only")
+        out["profile"] = profile
+    if "privacy" in cfg:
+        privacy = (cfg.get("privacy") or "public").strip().lower()
+        if privacy not in _PRIVACY:
+            raise StudioError(f"privacy must be one of: {', '.join(_PRIVACY)}")
+        out["privacy"] = privacy
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def list_channels(s: Session, include_archived=False):

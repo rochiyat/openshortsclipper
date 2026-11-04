@@ -16,10 +16,11 @@ REVIEW_STATUSES = ("draft", "approved", "rejected", "posted")
 # What a reviewer may set by hand; "posted" comes from recording a post (phase 3).
 REVIEWABLE_STATUSES = ("draft", "approved", "rejected")
 PLATFORMS = ("youtube", "tiktok", "instagram", "threads", "facebook", "x")
-PUBLISHERS = ("manual", "uploadpost")
+PUBLISHERS = ("manual", "uploadpost", "youtube_api")
 CAMPAIGN_STATUSES = ("active", "ended", "archived")
 POST_STATUSES = ("live", "removed", "failed", "pending")
 CLAIM_STATUSES = ("none", "submitted", "approved", "paid", "rejected")
+PUBLISH_STATUSES = ("queued", "running", "awaiting", "done", "failed", "canceled")
 SNAPSHOT_SOURCES = ("youtube_api", "ytdlp", "manual", "uploadpost")
 
 
@@ -194,3 +195,32 @@ class ViewSnapshot(Base):
     comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
     shares: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source: Mapped[str] = mapped_column(String)
+
+
+class PublishJob(Base):
+    """One clip to publish on one channel, now or at ``scheduled_at``."""
+    __tablename__ = "publish_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    clip_id: Mapped[str | None] = mapped_column(
+        ForeignKey("clips.id", ondelete="SET NULL"), nullable=True)
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id"))
+    campaign_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    publisher: Mapped[str] = mapped_column(String)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scheduled_at: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    post_id: Mapped[str | None] = mapped_column(
+        ForeignKey("posts.id", ondelete="SET NULL"), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=now_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=now_iso)
+
+    clip: Mapped["Clip | None"] = relationship(lazy="joined")
+    channel: Mapped[Channel] = relationship(lazy="joined")
+    campaign: Mapped["Campaign | None"] = relationship(lazy="joined")

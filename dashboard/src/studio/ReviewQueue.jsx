@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, Check, X, RotateCcw, ChevronLeft, ChevronRight, ShieldAlert, Save, Film, Send } from 'lucide-react';
+import { Loader2, Check, X, RotateCcw, ChevronLeft, ChevronRight, ShieldAlert, Save, Film, Send, Upload } from 'lucide-react';
 import RecordPostModal from './RecordPostModal';
+import PublishModal from './PublishModal';
 import {
   listClips, updateClip, updateProject, listCampaigns, mediaUrl, RIGHTS_OPTIONS,
 } from './api';
@@ -24,6 +25,8 @@ export default function ReviewQueue({ initialProjectId = '', onCountsChange }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [recording, setRecording] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     listCampaigns().then((d) => setCampaigns(d.campaigns || [])).catch(() => {});
@@ -239,6 +242,12 @@ export default function ReviewQueue({ initialProjectId = '', onCountsChange }) {
                   </button>
                 )}
                 {clip.review_status === 'approved' && (
+                  <button onClick={() => setPublishing(true)} disabled={!!busy || dirty} className="btn-primary px-4 py-2 text-xs"
+                    title={dirty ? 'Save your edits first' : 'Upload this clip to a channel, now or scheduled'}>
+                    <Upload size={14} /> publish
+                  </button>
+                )}
+                {clip.review_status === 'approved' && (
                   <button onClick={() => setRecording(true)} disabled={!!busy} className="btn-ghost px-4 py-2 text-xs"
                     title="You published this clip: paste its URL to track views">
                     <Send size={14} /> record post
@@ -254,6 +263,19 @@ export default function ReviewQueue({ initialProjectId = '', onCountsChange }) {
             </p>
           </div>
         </div>
+      )}
+      {notice && <p className="text-sm text-ink mt-4">{notice}</p>}
+      {publishing && clip && (
+        <PublishModal
+          clip={clip}
+          onClose={() => setPublishing(false)}
+          onQueued={(job) => {
+            setPublishing(false);
+            setNotice(job.scheduled_at > new Date().toISOString()
+              ? `Scheduled for ${new Date(job.scheduled_at).toLocaleString()} on ${job.channel?.name}. Track it in posts.`
+              : `Publishing to ${job.channel?.name}… Track it in posts.`);
+          }}
+        />
       )}
       {recording && clip && (
         <RecordPostModal

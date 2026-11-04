@@ -139,3 +139,24 @@ export const exportPostsUrl = () => getApiUrl('/api/studio/export/posts.csv');
 export const CLAIM_STATUSES = ['none', 'submitted', 'approved', 'paid', 'rejected'];
 
 export const formatCount = (n) => (n == null ? '—' : Number(n).toLocaleString());
+
+// ---- publishing ----
+export const PUBLISHERS = [
+  { value: 'manual', label: 'manual (paste the URL)' },
+  { value: 'youtube_api', label: 'youtube direct (oauth)' },
+  { value: 'uploadpost', label: 'upload-post' },
+];
+export const publisherAvailability = () => apiJson('/api/studio/publishers');
+export const publishPreview = (clipId, channelId) =>
+  apiJson(`/api/studio/publish/preview?clip_id=${encodeURIComponent(clipId)}&channel_id=${encodeURIComponent(channelId)}`);
+export const publishClip = (body) => apiJson('/api/studio/publish', { method: 'POST', ...json(body) });
+export const listPublishJobs = (status = '') =>
+  apiJson(`/api/studio/publish/jobs?status=${encodeURIComponent(status)}`);
+export const updatePublishJob = (id, patch) =>
+  apiJson(`/api/studio/publish/jobs/${id}`, { method: 'PATCH', ...json(patch) });
+export const cancelPublishJob = (id) => apiJson(`/api/studio/publish/jobs/${id}/cancel`, { method: 'POST' });
+export const retryPublishJob = (id) => apiJson(`/api/studio/publish/jobs/${id}/retry`, { method: 'POST' });
+export const youtubeConnectUrl = (channelId) =>
+  apiJson(`/api/studio/youtube/connect?channel_id=${encodeURIComponent(channelId)}&origin=${encodeURIComponent(window.location.origin)}`);
+export const youtubeDisconnect = (channelId) =>
+  apiJson(`/api/studio/channels/${channelId}/youtube/disconnect`, { method: 'POST' });

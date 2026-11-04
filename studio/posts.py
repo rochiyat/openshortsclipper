@@ -118,6 +118,22 @@ def create_post(s: Session, data: dict, *, force: bool = False) -> Post:
 
 
 def update_post(s: Session, post: Post, data: dict) -> Post:
+    if data.get("url"):
+        # Attach (or correct) the public URL, e.g. a TikTok draft finished by hand.
+        try:
+            parsed = parse_post_url(data["url"])
+        except PostUrlError as e:
+            raise StudioError(str(e))
+        if parsed.platform != post.platform:
+            raise StudioError(f"That is a {parsed.platform} URL but this post is on {post.platform}")
+        other = s.scalars(select(Post).where(Post.platform == parsed.platform,
+                                             Post.external_id == parsed.external_id,
+                                             Post.id != post.id)).first()
+        if other:
+            raise PostConflict("already_recorded", "This post is already recorded.", post_id=other.id)
+        post.external_id, post.url = parsed.external_id, parsed.url
+        if post.status == "pending":
+            post.status = "live"
     if "status" in data:
         if data["status"] not in POST_STATUSES:
             raise StudioError(f"status must be one of: {', '.join(POST_STATUSES)}")
