@@ -390,6 +390,9 @@ function App() {
   // Clip editor overlay: index of the clip being edited, or null.
   const [editingClip, setEditingClip] = useState(null);
   const [reframingClip, setReframingClip] = useState(null);
+  // A tool picked on a saved project's clip, run by that clip's ResultCard once
+  // the reopened job is on screen: { jobId, index, tool }.
+  const [pendingClipAction, setPendingClipAction] = useState(null);
 
   // Silent-success "saved" states for the settings key inputs (design.md: no alert popups)
   const [elevenLabsSaved, setElevenLabsSaved] = useState(false);
@@ -609,8 +612,13 @@ function App() {
 
   // Reopen a saved Studio project: the backend copied its files back into
   // output/ and answers with the job's result, like the cloud restore above.
-  const reopenStudioProject = async (data) => {
+  const reopenStudioProject = async (data, action = null) => {
     flushClipState();
+    setPendingClipAction(null);
+    if (action?.tool === 'edit') setEditingClip(action.index);
+    else if (action?.tool === 'reframe') setReframingClip(action.index);
+    else if (action?.tool === 'schedule') setShowScheduleWeek(true);
+    else if (action?.tool) setPendingClipAction({ jobId: data.job_id, index: action.index, tool: action.tool });
     setProjectState(data.project_state || null);
     // The source video is back on disk only when it was saved with the project.
     setNoSource(!data.has_source);
@@ -1177,6 +1185,9 @@ function App() {
         // The stretch picked under the cost line (seconds); absent = whole video.
         source_start: data.sourceStart ?? null,
         source_end: data.sourceEnd ?? null,
+        // Campaign rules, including the logo as a data URL. A string so the
+        // same value travels in the JSON body and in the upload's form fields.
+        video_requirements: data.videoRequirements ? JSON.stringify(data.videoRequirements) : null,
       };
 
       if (data.type === 'url') {
@@ -2452,6 +2463,8 @@ function App() {
                           jobId={jobId}
                           onEditClip={(index) => setEditingClip(index)}
                           onReframeClip={(index) => setReframingClip(index)}
+                          autoAction={pendingClipAction?.jobId === jobId && pendingClipAction.index === i ? pendingClipAction.tool : null}
+                          onAutoActionDone={() => setPendingClipAction(null)}
                           onUpgrade={isManaged ? openUpsell : null}
                           initialState={projectState?.clips?.find((c) => c.index === i) || null}
                           onStateChange={handleClipStateChange}

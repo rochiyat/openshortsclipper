@@ -119,6 +119,26 @@ def test_save_copies_clips_and_metadata(env):
     assert not (files / ".resume.json").exists()    # dot files never copied
 
 
+def test_clips_carry_their_viral_score_and_why(env):
+    client, fake, _dir = env
+    job_id = fake.make_job()
+    clips = fake.jobs[job_id]["result"]["clips"]
+    clips[0].update(predicted_score=91, why="Opens on a surprise.")
+    clips[1].update(predicted_score="high", why="  ")
+    p = client.post("/api/studio/projects", json={"job_id": job_id}).json()["project"]
+    assert (p["clips"][0]["predicted_score"], p["clips"][0]["why"]) == (91, "Opens on a surprise.")
+    # An unusable value shows nothing rather than a broken badge.
+    assert (p["clips"][1]["predicted_score"], p["clips"][1]["why"]) == (None, None)
+    reread = client.get(f"/api/studio/projects/{p['id']}").json()["project"]
+    assert reread["clips"][0]["predicted_score"] == 91
+
+
+def test_a_clip_without_scores_still_lists(env):
+    client, fake, _dir = env
+    p = client.post("/api/studio/projects", json={"job_id": fake.make_job()}).json()["project"]
+    assert p["clips"][0]["predicted_score"] is None and p["clips"][0]["why"] is None
+
+
 def test_include_source_keeps_the_source_video(env):
     client, fake, studio_dir = env
     job_id = fake.make_job()

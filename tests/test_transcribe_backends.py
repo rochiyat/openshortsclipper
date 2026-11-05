@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import types
 from types import SimpleNamespace
@@ -210,6 +211,58 @@ def test_run_whisper_transcription_materializes_segments(fake_faster_whisper, mo
     segments, info = tb.run_whisper_transcription("video.mp4")
     assert isinstance(segments, list)
     assert info.language == "es"
+
+
+def test_missing_cublas_dll_falls_back_to_cpu(fake_faster_whisper, monkeypatch):
+    monkeypatch.setenv("WHISPER_DEVICE", "cuda")
+    monkeypatch.setenv("WHISPER_COMPUTE", "float16")
+    monkeypatch.setattr(tb, "_whisper_force_cpu", False)
+    real_get_model = tb._get_whisper_model
+
+    def get_model():
+        model, device = real_get_model()
+        if device == "cuda":
+            def fail(path, **params):
+                raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+            model.transcribe = fail
+        return model, device
+
+    monkeypatch.setattr(tb, "_get_whisper_model", get_model)
+    segments, _info = tb.run_whisper_transcription("video.mp4")
+    assert len(segments) == 1
+    assert [m.device for m in fake_faster_whisper] == ["cuda", "cpu"]
+
+
+def test_unrelated_runtime_error_is_not_retried_on_cpu(fake_faster_whisper, monkeypatch):
+    monkeypatch.setattr(tb, "_whisper_force_cpu", False)
+
+    def fail(path, **params):
+        raise RuntimeError("Invalid data found when processing input")
+
+    monkeypatch.setattr(tb, "_run_whisper_once", fail)
+    with pytest.raises(RuntimeError):
+        tb.run_whisper_transcription("video.mp4")
+    assert tb._whisper_force_cpu is False
+
+
+def test_expose_cuda_dlls_prepends_installed_wheels_on_windows(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "nvidia" / "cublas" / "bin"
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setattr(tb.sys, "platform", "win32")
+    monkeypatch.setattr(tb.sysconfig, "get_paths", lambda: {"purelib": str(tmp_path)})
+    monkeypatch.setenv("PATH", "existing")
+
+    tb._expose_cuda_dlls()
+    tb._expose_cuda_dlls()
+
+    assert os.environ["PATH"].split(os.pathsep) == [str(bin_dir), "existing"]
+
+
+def test_expose_cuda_dlls_leaves_path_alone_elsewhere(monkeypatch):
+    monkeypatch.setattr(tb.sys, "platform", "linux")
+    monkeypatch.setenv("PATH", "existing")
+    tb._expose_cuda_dlls()
+    assert os.environ["PATH"] == "existing"
 
 
 # --- release_models: the API process must not keep the models resident ------

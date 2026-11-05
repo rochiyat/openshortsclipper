@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Image as ImageIcon } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import { track } from '../lib/analytics';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
+import ClipThumbnailModal, { ThumbnailGrid } from './ClipThumbnailModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
@@ -13,7 +14,7 @@ import TikTokDraftNotice from './TikTokDraftNotice';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
-const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2.5 sm:py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
+export const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2.5 sm:py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
 // Follow an async post (request_id from /api/social/post) for about a minute.
 // Returns {done, failed}: done once every platform finished, failed lists
@@ -36,10 +37,27 @@ async function followPost(requestId, tries = 12, everyMs = 5000) {
             .filter((x) => x.success === false)
             .map((x) => `${x.platform}${x.message ? `: ${x.message}` : ''}`);
         if (d.status !== 'completed' && !failed.length) failed.push('every platform');
-        return { done: d.status === 'completed', failed };
+        const url = (d.results || []).find((x) => x.url)?.url || null;
+        const message = (d.results || []).find((x) => x.success && x.message)?.message || null;
+        return { done: d.status === 'completed', failed, url, message };
     }
     return { done: false, failed: [] };
 }
+
+// A browser upload sends the whole file through YouTube Studio's own page, so
+// it gets far longer than an API post before the card stops following it.
+const BROWSER_POST_TRIES = 240;
+
+const PROVIDER_OPTIONS = [
+    { value: 'upload_post', label: 'upload-post' },
+    { value: 'browser', label: 'browser', hint: 'playwright' },
+];
+
+const VISIBILITY_OPTIONS = [
+    { value: 'public', label: 'public' },
+    { value: 'unlisted', label: 'unlisted' },
+    { value: 'private', label: 'private' },
+];
 
 const PLATFORM_OPTIONS = [
     { value: 'tiktok', label: 'tiktok', icon: <Video size={16} /> },
@@ -63,7 +81,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, onUpgrade = null }) {
+export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, onUpgrade = null, autoAction = null, onAutoActionDone = null }) {
     const [showModal, setShowModal] = useState(false);
     // The "why" line is clamped to two lines so cards in a row stay level;
     // when it overflows, a hover (desktop) or tap (touch) shows the whole
@@ -90,7 +108,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // subtitled file (double-subtitle bug).
     const stripBurns = (filename) => {
         let f = filename || '', prev;
-        do { prev = f; f = f.replace(/^subtitled_\d+_/, '').replace(/^hooked_\d+_/, '').replace(/^hook_/, ''); } while (f !== prev);
+        do { prev = f; f = f.replace(/^brand_/, '').replace(/^subtitled_\d+_/, '').replace(/^hooked_\d+_/, '').replace(/^hook_/, ''); } while (f !== prev);
         return f;
     };
     const originalVideoUrl = getApiUrl((clip.video_url || '').replace(/[^/]+$/, stripBurns((clip.video_url || '').split('/').pop())));
@@ -222,6 +240,15 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
     const [posting, setPosting] = useState(false);
     const [postResult, setPostResult] = useState(null);
+    // How the post goes out. browserPlatforms stays null while browser posting
+    // is off or unknown, which hides the choice and leaves Upload-Post alone.
+    const [provider, setProvider] = useState('upload_post');
+    const [browserPlatforms, setBrowserPlatforms] = useState(null);
+    const [visibility, setVisibility] = useState('public');
+    const viaBrowser = provider === 'browser';
+    const [showThumbModal, setShowThumbModal] = useState(false);
+    const [thumbnails, setThumbnails] = useState([]);
+    const [selectedThumb, setSelectedThumb] = useState(null);
     const [copied, setCopied] = useState(null);
 
     const handleCopy = async (field, text) => {
@@ -285,10 +312,31 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // Which platforms the selected profile actually has linked. `null` means
     // unknown (profile list not loaded) — in that case nothing is gated.
     const knownConnections = Array.isArray(connectedPlatforms);
-    const noAccountsConnected = knownConnections && connectedPlatforms.length === 0;
-    const platformOptions = knownConnections
-        ? PLATFORM_OPTIONS.map((o) => (connectedPlatforms.includes(o.value) ? o : { ...o, disabled: true, hint: 'not connected' }))
-        : PLATFORM_OPTIONS;
+    const noAccountsConnected = !viaBrowser && knownConnections && connectedPlatforms.length === 0;
+    const platformOptions = viaBrowser
+        ? PLATFORM_OPTIONS.map((o) => ((browserPlatforms || []).includes(o.value) ? o : { ...o, disabled: true, hint: 'upload-post only' }))
+        : knownConnections
+            ? PLATFORM_OPTIONS.map((o) => (connectedPlatforms.includes(o.value) ? o : { ...o, disabled: true, hint: 'not connected' }))
+            : PLATFORM_OPTIONS;
+
+    const uploadPostPlatforms = () => (knownConnections
+        ? { tiktok: connectedPlatforms.includes('tiktok'), instagram: connectedPlatforms.includes('instagram'), youtube: connectedPlatforms.includes('youtube') }
+        : { tiktok: true, instagram: true, youtube: true });
+
+    const chooseProvider = (next) => {
+        setProvider(next);
+        setPostResult(null);
+        if (next === 'browser') {
+            setIsScheduling(false);
+            setPlatforms({
+                tiktok: (browserPlatforms || []).includes('tiktok'),
+                instagram: (browserPlatforms || []).includes('instagram'),
+                youtube: (browserPlatforms || []).includes('youtube'),
+            });
+        } else {
+            setPlatforms(uploadPostPlatforms());
+        }
+    };
 
     const handleConnectAccounts = () => {
         setShowModal(false);
@@ -304,14 +352,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             setIsScheduling(false);
             setScheduleDate("");
             setPostResult(null);
+            setProvider('upload_post');
+            setVisibility('public');
             // Only preselect platforms the profile can actually publish to.
-            if (knownConnections) {
-                setPlatforms({
-                    tiktok: connectedPlatforms.includes('tiktok'),
-                    instagram: connectedPlatforms.includes('instagram'),
-                    youtube: connectedPlatforms.includes('youtube'),
-                });
-            }
+            if (knownConnections) setPlatforms(uploadPostPlatforms());
+            apiFetch('/api/social/browser/status')
+                .then((r) => (r.ok ? r.json() : null))
+                .then((d) => setBrowserPlatforms(d?.enabled && d.platforms?.length ? d.platforms : null))
+                .catch(() => setBrowserPlatforms(null));
+            apiFetch(`/api/clip/${jobId}/${index}/thumbnails`)
+                .then((r) => (r.ok ? r.json() : null))
+                .then((d) => { if (d) setThumbnails(d.thumbnails || []); })
+                .catch(() => {});
         }
         // Reset only when the modal opens for a clip; connection changes while
         // it is open must not wipe the user's selection.
@@ -690,8 +742,26 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         }
     };
 
+    // A tool picked on a saved project's card (Projects tab): the project was
+    // just reopened, so run the same action its button here would. The ref keeps
+    // a re-run effect from starting a paid auto edit twice.
+    const autoActionRan = useRef(false);
+    useEffect(() => {
+        if (!autoAction || autoActionRan.current) return;
+        autoActionRan.current = true;
+        videoRef.current?.scrollIntoView({ block: 'center' });
+        if (autoAction === 'auto') handleAutoEdit();
+        else if (autoAction === 'subtitles') setShowSubtitleModal(true);
+        else if (autoAction === 'hook') setShowHookModal(true);
+        else if (autoAction === 'dub') setShowTranslateModal(true);
+        else if (autoAction === 'thumbnail') setShowThumbModal(true);
+        else if (autoAction === 'post') setShowModal(true);
+        onAutoActionDone?.();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autoAction]);
+
     // Managed (cloud plan/trial) users post with the server-side key — no BYOK needed
-    const canPost = isManaged || (uploadPostKey && uploadUserId);
+    const canPost = viaBrowser || isManaged || (uploadPostKey && uploadUserId);
 
     const handlePost = async () => {
         if (!canPost) {
@@ -722,11 +792,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             const payload = {
                 job_id: jobId,
                 clip_index: index,
-                api_key: uploadPostKey,
-                user_id: uploadUserId,
                 platforms: selectedPlatforms,
                 title: postTitle,
-                description: postDescription
+                description: postDescription,
+                ...(viaBrowser
+                    ? { provider: 'browser', visibility, ...(selectedThumb ? { thumbnail: selectedThumb } : {}) }
+                    : { api_key: uploadPostKey, user_id: uploadUserId }),
             };
 
             if (isScheduling && scheduleDate) {
@@ -760,11 +831,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             }
             // A 200 only means Upload-Post took the file: follow the post to
             // its real end, so a platform that fails says so here.
-            setPostResult({ success: true, msg: "Publishing…" });
-            const outcome = await followPost(sent.request_id);
+            setPostResult({ success: true, msg: viaBrowser ? "Uploading in a Chrome window: leave it open until it closes." : "Publishing…" });
+            const outcome = viaBrowser ? await followPost(sent.request_id, BROWSER_POST_TRIES) : await followPost(sent.request_id);
             if (outcome.failed.length) {
                 setPostResult({ success: false, msg: `Failed on ${outcome.failed.join('; ')}` });
                 track('SocialPostFailed', { props: { platforms: selectedPlatforms.join(',') } });
+            } else if (viaBrowser && outcome.done) {
+                // Stays open so the link to the new video can be followed.
+                setPostResult({ success: true, msg: outcome.message || "Posted successfully!", url: outcome.url });
             } else {
                 setPostResult({ success: true, msg: outcome.done ? "Posted successfully!" : "Still publishing: check your accounts in a few minutes." });
                 setTimeout(() => {
@@ -1015,6 +1089,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         {isTranslating ? 'translating…' : 'dub voice'}
                     </button>
 
+                    <button onClick={() => setShowThumbModal(true)} className={QUIET_BTN}>
+                        <ImageIcon size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
+                        thumbnail
+                    </button>
+
                     <button
                         onClick={() => setShowModal(true)}
                         className="btn-primary flex-col gap-1 py-2.5 sm:py-2 px-1 text-[11px] leading-none rounded-input whitespace-nowrap"
@@ -1123,9 +1202,21 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {/* Both the title/description fields below and the schedule
                     button are downstream of this: on a tiktok draft neither
                     travels. See TikTokDraftNotice. */}
-                {platforms.tiktok && <TikTokDraftNotice />}
+                {platforms.tiktok && !viaBrowser && <TikTokDraftNotice />}
 
                 <div className="space-y-4">
+                    {browserPlatforms && (
+                        <div>
+                            <label className="eyebrow block mb-2">POST WITH</label>
+                            <SegmentedControl options={PROVIDER_OPTIONS} value={provider} onChange={chooseProvider} />
+                            {viaBrowser && (
+                                <p className="text-xs text-muted leading-snug mt-2 lowercase">
+                                    Uses the account logged in on this computer. A Chrome window opens and uploads through YouTube Studio.
+                                </p>
+                            )}
+                        </div>
+                    )}
+
                     {/* Title & Description */}
                     <div>
                         <label className="eyebrow block mb-1.5">TITLE</label>
@@ -1149,8 +1240,35 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         />
                     </div>
 
+                    {viaBrowser && (
+                        <div>
+                            <label className="eyebrow block mb-2">YOUTUBE VISIBILITY</label>
+                            <SegmentedControl options={VISIBILITY_OPTIONS} value={visibility} onChange={setVisibility} />
+                        </div>
+                    )}
+
+                    {viaBrowser && (
+                        <div>
+                            <div className="flex items-center justify-between gap-2 mb-2">
+                                <label className="eyebrow">YOUTUBE THUMBNAIL</label>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowThumbModal(true)}
+                                    className="text-xs lowercase text-muted hover:text-brass underline underline-offset-2 transition-colors"
+                                >
+                                    generate
+                                </button>
+                            </div>
+                            {thumbnails.length ? (
+                                <ThumbnailGrid thumbnails={thumbnails} selected={selectedThumb} onSelect={setSelectedThumb} />
+                            ) : (
+                                <p className="text-xs text-muted lowercase">none yet: youtube picks one from the video.</p>
+                            )}
+                        </div>
+                    )}
+
                     {/* Scheduling */}
-                    <div className="p-3 bg-paper rounded-input border border-rule">
+                    {!viaBrowser && <div className="p-3 bg-paper rounded-input border border-rule">
                         <label className="flex items-center justify-between cursor-pointer">
                             <span className="flex items-center gap-2 text-sm text-ink2 lowercase">
                                 <Calendar size={16} className={isScheduling ? 'text-brass' : 'text-muted'} /> schedule post
@@ -1174,7 +1292,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                                 />
                             </div>
                         )}
-                    </div>
+                    </div>}
 
                     {/* Platforms */}
                     <div>
@@ -1196,6 +1314,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         <div className={postResult.success ? 'badge-ok' : 'badge-danger'}>
                             {postResult.success ? <Check size={12} className="shrink-0" /> : <AlertCircle size={12} className="shrink-0" />}
                             {postResult.msg}
+                            {postResult.url && (
+                                <a href={postResult.url} target="_blank" rel="noopener noreferrer" className="underline ml-1">open video</a>
+                            )}
                         </div>
                     )}
                 </div>
@@ -1232,6 +1353,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 serverRender={hasServerBurns}
                 burnedHook={burnedHook}
                 onRemove={burnedHook ? handleRemoveHook : null}
+            />
+
+            <ClipThumbnailModal
+                isOpen={showThumbModal}
+                onClose={() => setShowThumbModal(false)}
+                jobId={jobId}
+                clipIndex={index}
+                geminiApiKey={geminiApiKey}
+                thumbnails={thumbnails}
+                onThumbnails={setThumbnails}
+                selected={selectedThumb}
+                onSelect={setSelectedThumb}
             />
 
             <TranslateModal

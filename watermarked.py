@@ -38,7 +38,7 @@ _VIDEO_EXTENSIONS = frozenset({".mp4", ".webm", ".mov", ".m4v", ".mkv", ".ogv"})
 # own scratch files (``temp_preview_<i>.mp4``, ``temp_scene_*.jpg``) are not
 # clips and stay servable on a marked job.
 _DELIVERABLE_RE = re.compile(
-    r'^(?:subtitled_\d+_|hooked_\d+_|hook_|recut_|edited_|translated_)|_clip_\d+\.[A-Za-z0-9]+$'
+    r'^(?:brand_|subtitled_\d+_|hooked_\d+_|hook_|recut_|edited_|translated_)|_clip_\d+\.[A-Za-z0-9]+$'
 )
 
 

@@ -1,4 +1,5 @@
 """/api/studio: saved projects (self-host only)."""
+import json
 import os
 from typing import Optional
 
@@ -39,8 +40,27 @@ def _media_url(project_id: str, file_name: str) -> str:
     return f"/api/studio/media/{project_id}/{file_name}"
 
 
+def _selection_notes(c: Clip) -> tuple:
+    """(predicted_score, why) from the pipeline's record of the clip, kept in the
+    metadata column, so projects saved before this was shown have them too."""
+    try:
+        meta = json.loads(c.metadata_json or "{}")
+    except ValueError:
+        return None, None
+    if not isinstance(meta, dict):
+        return None, None
+    score = meta.get("predicted_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        score = None
+    why = meta.get("why")
+    return score, (why if isinstance(why, str) and why.strip() else None)
+
+
 def _clip_out(c: Clip) -> dict:
+    predicted_score, why = _selection_notes(c)
     return {
+        "predicted_score": predicted_score,
+        "why": why,
         "id": c.id,
         "clip_index": c.clip_index,
         "file_name": c.file_name,

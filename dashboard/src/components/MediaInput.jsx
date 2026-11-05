@@ -3,6 +3,7 @@ import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown } from 'lucide-
 import { track } from '../lib/analytics';
 import { getApiUrl } from '../config';
 import SourceCost from './SourceCost';
+import VideoRequirementsPanel from './VideoRequirementsPanel';
 
 const SUPPORTED_PLATFORMS = [
     'YouTube', 'Vimeo', 'TikTok', 'X / Twitter', 'Twitch', 'Kick',
@@ -63,6 +64,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
     // depend on the detector, and 'none' keeps the plain single crop.
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
+    });
+    // Campaign rules. Kept across jobs, since one campaign usually spans several
+    // videos; the panel's label says when they are in force.
+    const [videoRequirements, setVideoRequirements] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('os_video_requirements')) || {}; } catch { return {}; }
     });
     const infoRef = useRef(null);
 
@@ -129,7 +135,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
             layout,
             sourceStart: range ? Math.round(range.start) : null,
             sourceEnd: range ? Math.round(range.end) : null,
+            videoRequirements: Object.values(videoRequirements).some(Boolean) ? videoRequirements : null,
         };
+        try {
+            localStorage.setItem('os_video_requirements', JSON.stringify(videoRequirements));
+        } catch { /* a logo can exceed the storage quota; the job still carries it */ }
         try {
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
             localStorage.setItem('os_auto_hook_style_v2', autoHookStyle);
@@ -403,6 +413,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         </div>
                     )}
                 </div>
+
+                <VideoRequirementsPanel value={videoRequirements} onChange={setVideoRequirements} />
 
                 <label className="flex items-start gap-2.5 mt-5 text-left text-[13px] sm:text-xs leading-relaxed text-muted cursor-pointer select-none">
                     <input

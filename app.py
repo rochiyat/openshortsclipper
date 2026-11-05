@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
 import layout_ranges
+import video_requirements
 import watermarked
 import media_auth
 
@@ -966,6 +967,7 @@ def _canonical_clip_file(output_dir, base_name, index):
                    + glob.glob(os.path.join(output_dir, f"recut_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hooked_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hook_{clean}"))
+                   + glob.glob(os.path.join(output_dir, f"brand_*{clean}"))
                    + glob.glob(os.path.join(output_dir, f"wm_*{clean}")))
     except Exception:
         derived = []
@@ -976,8 +978,9 @@ def _canonical_clip_file(output_dir, base_name, index):
             return os.path.getmtime(_win_path(f))
         except OSError:
             return 0
-    # Prefer final subtitled / wm files over intermediate hooked/recut
-    subtitled = [f for f in derived if os.path.basename(f).startswith(('subtitled_', 'wm_'))]
+    # Prefer final subtitled / brand / wm files over intermediate hooked/recut
+    subtitled = [f for f in derived
+                 if os.path.basename(f).startswith(('subtitled_', 'brand_', 'wm_'))]
     pool = subtitled if subtitled else derived
     return os.path.basename(max(pool, key=_file_mtime))
 
@@ -1033,11 +1036,18 @@ def _strip_watermark_copy(output_dir, filename):
     one next to it (see the ``watermarked`` module); every derivation starts
     from the clean one, so the mark is always the outermost layer to strip.
     Same fail-safe contract as the other walk-backs: unchanged when there is
-    nothing to strip or the twin is gone."""
+    nothing to strip or the twin is gone.
+
+    A ``brand_`` copy (video requirements) sits right under the mark and is
+    stripped with it: ``_deliver`` puts it back on whatever the edit produces."""
     if watermarked.is_marked(filename):
         clean = watermarked.clean_name(filename)
         if os.path.exists(os.path.join(output_dir, clean)):
-            return clean
+            filename = clean
+    if filename.startswith(video_requirements.PREFIX):
+        under = video_requirements.unbranded_name(filename)
+        if os.path.exists(os.path.join(output_dir, under)):
+            return under
     return filename
 
 
@@ -1085,13 +1095,19 @@ async def _deliver(request, job_id, filename):
 
     Decided from the caller's plan right now, not from the job's flag: the
     flag is lost on a restart/restore, and a user who upgraded mid-session
-    must get clean files from their next edit on. Self-host never marks."""
+    must get clean files from their next edit on. Self-host never marks.
+
+    The job's required logo and text go on first, whatever the plan
+    (``video_requirements.brand_delivery``), so an edit cannot lose them."""
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    branded = await asyncio.to_thread(
+        video_requirements.brand_delivery, os.path.join(output_dir, filename))
+    filename = os.path.basename(branded)
     if not BILLING_ENABLED:
         return filename
     user = await _user_from_request(request)
     if user is None or user.plan != "free":
         return filename
-    output_dir = os.path.join(OUTPUT_DIR, job_id)
     # Only jobs the pipeline rendered under this scheme (marker file). A job
     # from before it has the mark burned into its canonical, so every
     # derivative already carries one and a copy would stack a second.
@@ -2195,6 +2211,7 @@ _PERMANENT_MARKERS = (
     "prohibited_content", "blocked this video", "blocked its answer",
     "did not return usable clips", "clip detection failed", "short-form content",
     "sign in to confirm your age", "not available in your country",
+    "is not found or cannot be loaded",  # a missing CUDA DLL stays missing
 )
 
 
@@ -3685,6 +3702,7 @@ async def process_endpoint(
     max_minutes: Optional[str] = Form(None),
     source_start: Optional[str] = Form(None),
     source_end: Optional[str] = Form(None),
+    video_requirements_field: Optional[str] = Form(None, alias="video_requirements"),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
@@ -3719,6 +3737,14 @@ async def process_endpoint(
         max_minutes = body.get("max_minutes")
         source_start = body.get("source_start")
         source_end = body.get("source_end")
+        video_requirements_field = body.get("video_requirements")
+
+    # Campaign rules for this job. Bad input is a 400 before anything is
+    # reserved or downloaded.
+    try:
+        requirements_spec, requirements_logo = video_requirements.parse(video_requirements_field)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid video_requirements: {e}")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -3791,6 +3817,7 @@ async def process_endpoint(
     job_id = str(uuid.uuid4())
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
+    video_requirements.save(job_output_dir, requirements_spec, requirements_logo)
 
     # Prepare Command
     # sys.executable, not "python": bare "python" resolves against PATH, which
@@ -4508,7 +4535,9 @@ from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_f
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import (analyze_video_for_titles, refine_titles, generate_thumbnail,
-                       generate_youtube_description, extract_face_frames)
+                       generate_youtube_description, extract_face_frames, CLIP_TEMPLATES,
+                       CLIP_TEMPLATE_IDS, clip_thumbnail_instructions, fetch_style_reference,
+                       save_style_reference)
 
 class EditRequest(BaseModel):
     job_id: str
@@ -4880,8 +4909,8 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
         "canonical_range": canonical_range,
         "duration": total,
         "current_file": current_file,
-        "has_captions": bool(re.match(r'^subtitled_\d+_',
-                                      watermarked.clean_name(current_file))),
+        "has_captions": bool(re.match(r'^subtitled_\d+_', video_requirements.unbranded_name(
+            watermarked.clean_name(current_file)))),
         "words": words_out,
         "source": {
             "available": bool(source_path),
@@ -6240,8 +6269,14 @@ class SocialPostRequest(BaseModel):
     description: Optional[str] = None
     scheduled_date: Optional[str] = None # ISO-8601 string
     timezone: Optional[str] = "UTC"
+    provider: str = "upload_post"  # or "browser" (browser_post.py, self-host opt-in)
+    visibility: str = "public"  # browser provider only
+    thumbnail: Optional[str] = None  # browser provider only: a file of the clip's thumbnails
+
+from urllib.parse import urlparse
 
 import httpx
+import browser_post
 
 
 def _post_video_blocking(url, headers, data, file_path, filename, timeout):
@@ -6324,8 +6359,74 @@ async def _check_social_post_rate(request):
     times.append(now)
 
 
+def _browser_post_allowed(request: Request) -> bool:
+    """Browser posting acts as the logged-in user with no API key to check, so
+    it answers only to this machine: never on Cloud, never unless switched on,
+    and never from another host or from a web page on another site (the API's
+    self-host CORS is a wildcard)."""
+    if BILLING_ENABLED or not browser_post.enabled():
+        return False
+    local = ("127.0.0.1", "::1", "localhost")
+    if not request.client or request.client.host not in local:
+        return False
+    origin = request.headers.get("origin")
+    return not origin or urlparse(origin).hostname in local
+
+
+@app.get("/api/social/browser/status")
+async def browser_post_status(request: Request):
+    if not _browser_post_allowed(request):
+        return {"enabled": False, "platforms": []}
+    return {"enabled": True, "platforms": browser_post.available_platforms()}
+
+
+async def _post_via_browser(req: SocialPostRequest, request: Request):
+    if not _browser_post_allowed(request):
+        raise HTTPException(status_code=403, detail="Browser posting is not available here")
+    unsupported = [p for p in req.platforms if p not in browser_post.available_platforms()]
+    if unsupported or not req.platforms:
+        raise HTTPException(status_code=400, detail=(
+            f"Browser posting cannot reach: {', '.join(unsupported) or 'no platform selected'}"))
+    if req.scheduled_date:
+        raise HTTPException(status_code=400, detail="Browser posting cannot schedule yet")
+    if req.visibility not in browser_post.VISIBILITIES:
+        raise HTTPException(status_code=400, detail="Invalid visibility")
+
+    await _ensure_job_files(req.job_id, request)
+    clips = ((jobs.get(req.job_id) or {}).get('result') or {}).get('clips')
+    if not clips or not 0 <= req.clip_index < len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip = clips[req.clip_index]
+    filename = clip['video_url'].split('/')[-1]
+    file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    thumbnail_path = None
+    if req.thumbnail:
+        if not _CLIP_THUMB_NAME_RE.fullmatch(req.thumbnail):
+            raise HTTPException(status_code=400, detail="Invalid thumbnail")
+        thumbnail_path = os.path.join(_clip_thumbs_path(req.job_id, req.clip_index), req.thumbnail)
+        if not os.path.isfile(thumbnail_path):
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+    title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title') or 'Viral Short'
+    description = (req.description or clip.get('video_description_for_instagram')
+                   or clip.get('video_description_for_tiktok') or '')
+    request_id = browser_post.start(
+        req.platforms[0], file_path=os.path.abspath(file_path),
+        title=browser_post.clean_text(youtube_title(title), YOUTUBE_TITLE_MAX),
+        description=browser_post.clean_text(description, 5000),
+        visibility=req.visibility,
+        thumbnail_path=os.path.abspath(thumbnail_path) if thumbnail_path else None,
+    )
+    return {"success": True, "request_id": request_id}
+
+
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest, request: Request):
+    if req.provider == "browser":
+        return await _post_via_browser(req, request)
     await _ensure_job_files(req.job_id, request)
     if req.job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -6438,6 +6539,10 @@ async def social_post_status(request_id: str, request: Request):
     itself can still fail per platform, and the dashboard used to say "Posted
     successfully!" either way.
     """
+    if browser_post.is_browser_request(request_id):
+        if not _browser_post_allowed(request):
+            raise HTTPException(status_code=404, detail="Not found")
+        return browser_post.status(request_id)
     owner = _post_request_owners.get(request_id)
     if owner is None:
         return {"status": "unknown"}
@@ -7316,6 +7421,147 @@ async def thumbnail_titles(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _require_paid_thumbnails(request: Request):
+    """Image generation is the one expensive managed Gemini call: paid plans only."""
+    if BILLING_ENABLED:
+        user = await _user_from_request(request)
+        if user is not None and user.plan == "free":
+            raise HTTPException(status_code=403, detail={
+                "error": "plan_required",
+                "message": "AI thumbnail generation is available on paid plans.",
+            })
+
+
+# A clip's thumbnails live with the job, so they are served, authorised and swept
+# like its video: /videos/<job>/clip_thumbs/<clip index>/thumb_<batch>_<n>.jpg
+CLIP_THUMBS_DIR = "clip_thumbs"
+_CLIP_THUMB_NAME_RE = re.compile(r"thumb_[0-9a-f]+_\d+\.jpg")
+
+
+def _clip_thumbs_path(job_id: str, clip_index: int) -> str:
+    return os.path.join(OUTPUT_DIR, job_id, CLIP_THUMBS_DIR, str(clip_index))
+
+
+def _list_clip_thumbnails(job_id: str, clip_index: int) -> list:
+    """The clip's thumbnails, newest first."""
+    folder = _clip_thumbs_path(job_id, clip_index)
+    try:
+        names = [n for n in os.listdir(folder) if _CLIP_THUMB_NAME_RE.fullmatch(n)]
+    except OSError:
+        return []
+    names.sort(key=lambda n: (-os.path.getmtime(os.path.join(folder, n)), n))
+    return [{"file": n, "url": f"/videos/{job_id}/{CLIP_THUMBS_DIR}/{clip_index}/{n}"} for n in names]
+
+
+async def _clip_for_thumbnails(job_id: str, clip_index: int, request: Request) -> dict:
+    await _ensure_job_files(job_id, request)
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _assert_job_owner(request, job)
+    clips = (job.get('result') or {}).get('clips') or []
+    if not 0 <= clip_index < len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    return clips[clip_index]
+
+
+@app.get("/api/clip/{job_id}/{clip_index}/thumbnails")
+async def clip_thumbnails_list(job_id: str, clip_index: int, request: Request):
+    await _clip_for_thumbnails(job_id, clip_index, request)
+    templates = [{"id": t["id"], "label": t["label"], "hint": t["hint"]} for t in CLIP_TEMPLATES]
+    return {"thumbnails": _list_clip_thumbnails(job_id, clip_index), "templates": templates}
+
+
+@app.post("/api/clip/{job_id}/{clip_index}/thumbnails")
+async def clip_thumbnails_generate(
+    job_id: str,
+    clip_index: int,
+    request: Request,
+    template: str = Form("auto"),
+    count: int = Form(3),
+    template_url: str = Form(""),
+    template_file: Optional[UploadFile] = File(None),
+):
+    """Vertical thumbnails for one clip. The look comes from a template in the
+    list, or from an image the user uploads or links, used as a style reference."""
+    api_key = await resolve_gemini(request)
+    if not api_key:
+        raise gemini_missing_error()
+    await _require_paid_thumbnails(request)
+    clip = await _clip_for_thumbnails(job_id, clip_index, request)
+    if template not in CLIP_TEMPLATE_IDS:
+        raise HTTPException(status_code=400, detail="Unknown template")
+    count = min(max(1, count), 6)
+
+    video_path = os.path.join(OUTPUT_DIR, job_id, os.path.basename(clip.get('video_url') or ''))
+    if not os.path.isfile(video_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    folder = _clip_thumbs_path(job_id, clip_index)
+    os.makedirs(folder, exist_ok=True)
+    # Dotfiles are never served: the reference and the frames are only inputs.
+    work_dir = os.path.join(folder, f".work_{uuid.uuid4().hex[:8]}")
+    os.makedirs(work_dir)
+    style_path = os.path.join(work_dir, "style.jpg")
+    reservation_id = None
+    try:
+        # Before reserving: a bad image or link costs the user nothing.
+        try:
+            if template_file and template_file.filename:
+                await asyncio.to_thread(
+                    save_style_reference, await template_file.read(), style_path)
+            elif template_url.strip():
+                await asyncio.to_thread(fetch_style_reference, template_url, style_path)
+            else:
+                style_path = None
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        thumb_minutes = _cloud_config.THUMBNAIL_MINUTES if BILLING_ENABLED else 0
+        reservation_id = await reserve_managed_action(request, thumb_minutes, job_id, "thumbnail")
+
+        title = clip.get('video_title_for_youtube_short') or clip.get('title') or 'Short clip'
+        context = "\n".join(str(v) for v in (
+            clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok'),
+            clip.get('why'),
+        ) if v)
+        spec = video_requirements.load(os.path.join(OUTPUT_DIR, job_id))
+        instructions = clip_thumbnail_instructions(
+            template, has_style_reference=bool(style_path), must_avoid=spec.get("must_avoid", ""))
+
+        def render():
+            # The person in the clip, when a face can be found: without one the
+            # concepts are built around objects, which is still a thumbnail.
+            frame = None
+            try:
+                frames = extract_face_frames(video_path, job_id, n=1, out_dir=work_dir)
+                frame = frames[0] if frames else None
+            except Exception as e:
+                print(f"⚠️ [Thumbnail] No frame from the clip: {e}")
+            return generate_thumbnail(
+                api_key, title, job_id, extra_prompt=instructions, count=count,
+                video_context=context, language="the same language as the video title",
+                frame_reference=frame, output_dir=folder,
+                url_prefix=f"/videos/{job_id}/{CLIP_THUMBS_DIR}/{clip_index}",
+                vertical=True, style_reference_path=style_path)
+
+        generated = await asyncio.to_thread(render)
+        if reservation_id:
+            await _metering.commit_reservation(reservation_id)
+        return {"generated": len(generated), "thumbnails": _list_clip_thumbnails(job_id, clip_index)}
+    except HTTPException:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        raise
+    except Exception as e:
+        if reservation_id:
+            await _metering.release_reservation(reservation_id)
+        print(f"❌ Clip Thumbnail Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 @app.post("/api/thumbnail/generate")
 async def thumbnail_generate(
     request: Request,
@@ -7339,14 +7585,7 @@ async def thumbnail_generate(
     if not api_key:
         raise gemini_missing_error()
 
-    # Image generation is the one expensive managed Gemini call — paid plans only.
-    if BILLING_ENABLED:
-        user = await _user_from_request(request)
-        if user is not None and user.plan == "free":
-            raise HTTPException(status_code=403, detail={
-                "error": "plan_required",
-                "message": "AI thumbnail generation is available on paid plans.",
-            })
+    await _require_paid_thumbnails(request)
     # The session carries someone's transcript, titles and frames: only its
     # owner may generate from it (and be billed for it).
     _sess = thumbnail_sessions.get(session_id)

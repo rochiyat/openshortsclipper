@@ -97,6 +97,10 @@ class TestClassification:
         assert not app_module.is_transient_failure(["ERROR: [youtube] x: Video unavailable"])
         assert not app_module.is_transient_failure(["❌ This video has no audio track."])
 
+    def test_missing_cuda_dll_is_not(self):
+        assert not app_module.is_transient_failure(
+            ["RuntimeError: Library cublas64_12.dll is not found or cannot be loaded"])
+
     def test_unknown_is_not(self):
         assert not app_module.is_transient_failure(["Process failed with exit code 1"])
 
