@@ -89,7 +89,8 @@ def test_one_platform_failing_still_says_the_other_went_out(api, monkeypatch):
     client = TestClient(api.app, client=LOCAL)
     r = client.post("/api/social/post", json=body(platforms=["youtube", "tiktok"], visibility="private"))
     final = wait_final(client, r.json()["request_id"])
-    assert final["status"] == "failed"
+    # Completed once anything went out; the failed one still says so.
+    assert final["status"] == "completed"
     assert [x["success"] for x in final["results"]] == [False, True]
 
 

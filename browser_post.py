@@ -13,15 +13,23 @@ failure for the user to resolve, never worked around.
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 import uuid
 
+import browser_accounts
+
 _TRUE = ("1", "true", "yes", "on")
 
-PLATFORMS = ("youtube", "tiktok")
+PLATFORMS = browser_accounts.POST_PLATFORMS
+# Where a login window opens, per account platform.
+LOGIN_URLS = {"youtube": "https://studio.youtube.com/",
+              "tiktok": "https://www.tiktok.com/tiktokstudio",
+              "konten": os.environ.get("KONTEN_URL", "https://konten.com/")}
+LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
 VISIBILITIES = {
     "youtube": ("public", "unlisted", "private"),
     "tiktok": ("public", "friends", "private"),
@@ -32,29 +40,58 @@ REQUEST_PREFIX = "browser_"
 # overruns it, so it must stay above the sum of the worker's own waits.
 UPLOAD_WAIT_SECONDS = 15 * 60
 WORKER_TIMEOUT_SECONDS = 25 * 60
+# A login window stays open until the person closes it, up to this long.
+LOGIN_WINDOW_SECONDS = 20 * 60
+LOGIN_TIMEOUT_SECONDS = LOGIN_WINDOW_SECONDS + 2 * 60
 
 _posts: dict = {}
 _posts_lock = threading.Lock()
-# One upload per platform at a time: a browser profile can only be open once.
-_platform_locks = {p: threading.Lock() for p in PLATFORMS}
+# One browser per profile at a time: a profile can only be open once. Posts
+# wait their turn; a login window is refused while the profile is busy.
+_profile_locks: dict = {}
+_logins: dict = {}
 
 
 def enabled() -> bool:
     return os.environ.get("BROWSER_POST_ENABLED", "").strip().lower() in _TRUE
 
 
-def profile_dir(platform: str) -> str:
-    """The persistent browser profile a platform's login lives in."""
-    root = os.path.abspath(os.environ.get("BROWSER_POST_PROFILE_ROOT", "skills"))
-    return os.path.join(root, f"{platform}-connector", "browser_profile")
+def is_local_request(request) -> bool:
+    """From this machine, and not from a web page on another site (the API's
+    self-host CORS is a wildcard). A logged-in browser answers to nothing else."""
+    from urllib.parse import urlparse
+    if not request.client or request.client.host not in LOCAL_HOSTS:
+        return False
+    origin = request.headers.get("origin")
+    return not origin or urlparse(origin).hostname in LOCAL_HOSTS
+
+
+def playwright_installed() -> bool:
+    return importlib.util.find_spec("playwright") is not None
+
+
+def _profile_lock(account_id: str) -> threading.Lock:
+    with _posts_lock:
+        return _profile_locks.setdefault(account_id, threading.Lock())
+
+
+def accounts() -> list:
+    """Saved accounts, each with whether a login window is open for it now."""
+    out = []
+    for account in browser_accounts.list_accounts():
+        with _posts_lock:
+            login = dict(_logins.get(account["id"]) or {})
+        out.append({**account, "login": login or None})
+    return out
 
 
 def available_platforms() -> list:
     """Platforms that can post now. Only checks a profile exists: whether its
     login is still good is known when a post opens it."""
-    if importlib.util.find_spec("playwright") is None:
+    if not playwright_installed():
         return []
-    return [p for p in PLATFORMS if os.path.isdir(profile_dir(p))]
+    have = {a["platform"] for a in browser_accounts.list_accounts() if a["has_profile"]}
+    return [p for p in PLATFORMS if p in have]
 
 
 def clean_text(text, limit: int) -> str:
@@ -73,25 +110,37 @@ def status(request_id: str) -> dict:
         return dict(post) if post else {"status": "unknown", "results": []}
 
 
-def _finish(request_id: str, results: list):
-    """Failed if any platform failed: each result still says which ones went out."""
+def _result(target: dict, result: dict) -> dict:
+    return {
+        "platform": target["platform"],
+        "account_id": target["account_id"],
+        "channel_id": target.get("channel_id"),
+        "target": target["label"],
+        "success": bool(result.get("success")),
+        "message": result.get("message"),
+        "url": result.get("url"),
+    }
+
+
+def _add_result(request_id: str, entry: dict, final: bool):
     with _posts_lock:
-        _posts[request_id] = {
-            "status": "completed" if all(r["success"] for r in results) else "failed",
-            "results": results,
-        }
+        post = _posts[request_id]
+        post["results"] = [*post["results"], entry]
+        if final:
+            ok = [r["success"] for r in post["results"]]
+            post["status"] = "completed" if any(ok) else "failed"
 
 
-def _run_worker(job: dict) -> dict:
+def _run_worker(job: dict, timeout: int = WORKER_TIMEOUT_SECONDS) -> dict:
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     try:
         proc = subprocess.run(
             [sys.executable, os.path.abspath(__file__), "--worker"],
             input=json.dumps(job).encode("utf-8"), capture_output=True,
-            timeout=WORKER_TIMEOUT_SECONDS, env=env,
+            timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
-        return {"success": False, "message": "The browser upload took too long and was stopped."}
+        return {"success": False, "message": "The browser took too long and was stopped."}
     lines = proc.stdout.decode("utf-8", "replace").strip().splitlines()
     try:
         result = json.loads(lines[-1])
@@ -103,40 +152,116 @@ def _run_worker(job: dict) -> dict:
     return {"success": False, "message": f"The browser could not start: {tail or 'no output'}"}
 
 
-def start(platforms: list, *, file_path: str, title: str, description: str,
-          visibility: str = "public", thumbnail_path: str = None) -> str:
-    """Start the uploads in the background, one platform after the other so only
-    one window opens at a time, and return the request id."""
+def start(targets: list, *, file_path: str, visibility: str = "public",
+          thumbnail_path: str = None) -> str:
+    """Start uploading one file to each target in the background, one after
+    another, and return the request id. A target is a dict with platform,
+    account_id, profile_dir, label, title, description and, for YouTube, an
+    optional channel_id."""
     request_id = f"{REQUEST_PREFIX}{uuid.uuid4().hex}"
     with _posts_lock:
         _posts[request_id] = {"status": "in_progress", "results": []}
 
     def run():
-        results = []
-        for platform in platforms:
-            job = {"platform": platform, "profile_dir": profile_dir(platform), "file_path": file_path,
-                   "title": title, "description": description, "visibility": visibility,
-                   "thumbnail_path": thumbnail_path}
-            with _platform_locks[platform]:
-                try:
+        for n, target in enumerate(targets):
+            job = {"mode": "post", "platform": target["platform"], "profile_dir": target["profile_dir"],
+                   "channel_id": target.get("channel_id"), "file_path": file_path,
+                   "title": target["title"], "description": target["description"],
+                   "visibility": visibility, "thumbnail_path": thumbnail_path}
+            try:
+                with _profile_lock(target["account_id"]):
                     result = _run_worker(job)
-                except Exception as e:  # the status must always reach a final state
-                    result = {"success": False, "message": str(e)}
-            results.append({
-                "platform": platform,
-                "success": bool(result.get("success")),
-                "message": result.get("message"),
-                "url": result.get("url"),
-            })
-        _finish(request_id, results)
+            except Exception as e:  # the status must always reach a final state
+                result = {"success": False, "message": str(e)}
+            _add_result(request_id, _result(target, result), final=n == len(targets) - 1)
 
     threading.Thread(target=run, name="browser-post", daemon=True).start()
     return request_id
 
 
+class Busy(Exception):
+    pass
+
+
+def open_login(account_id: str):
+    """Open a visible window on the account's profile for the person to log in
+    and visit each channel in Studio. When they close it, the Studio channels
+    seen are added to the account. Raises Busy while the profile is in use."""
+    account = browser_accounts.get(account_id)
+    lock = _profile_lock(account_id)
+    if not lock.acquire(blocking=False):
+        raise Busy("This account's browser is already open (a login window or an upload).")
+    with _posts_lock:
+        _logins[account_id] = {"status": "open", "message": None}
+    job = {"mode": "login", "platform": account["platform"],
+           "profile_dir": browser_accounts.profile_dir(account),
+           "url": LOGIN_URLS.get(account["platform"], LOGIN_URLS["youtube"])}
+
+    def run():
+        try:
+            try:
+                result = _run_worker(job, timeout=LOGIN_TIMEOUT_SECONDS)
+            except Exception as e:
+                result = {"success": False, "message": str(e)}
+            channels = result.get("channels") or []
+            if result.get("success"):
+                try:
+                    browser_accounts.record_login(account_id, channels)
+                except KeyError:  # deleted while the window was open
+                    pass
+            found = len(channels)
+            if not result.get("success"):
+                message = result.get("message")
+            elif account["platform"] != "youtube":
+                message = "Login window closed."
+            elif found:
+                message = f"{found} channel{'s' if found != 1 else ''} seen in YouTube Studio."
+            else:
+                message = ("No YouTube Studio channel was seen: add channels by hand, "
+                           "or open the window again and visit YouTube Studio.")
+            with _posts_lock:
+                _logins[account_id] = {"status": "done" if result.get("success") else "failed",
+                                       "message": message}
+        finally:
+            lock.release()
+
+    threading.Thread(target=run, name=f"browser-login-{account_id}", daemon=True).start()
+
+
+READ_TIMEOUT_SECONDS = 3 * 60
+READ_TEXT_MAX = 60_000
+
+
+def read_page(account_id: str, url: str) -> dict:
+    """The visible text of ``url`` opened in the account's logged-in profile,
+    for a brief or a campaign list. Blocking; waits while the profile is busy.
+    Returns {success, title, url, text} or {success: False, message}."""
+    account = browser_accounts.get(account_id)
+    job = {"mode": "read", "platform": account["platform"],
+           "profile_dir": browser_accounts.profile_dir(account), "url": url}
+    with _profile_lock(account_id):
+        return _run_worker(job, timeout=READ_TIMEOUT_SECONDS)
+
+
+def delete_account(account_id: str):
+    """Delete an account and its login, unless its browser is open right now."""
+    lock = _profile_lock(account_id)
+    if not lock.acquire(blocking=False):
+        raise Busy("This account's browser is open: close it or wait for the upload, then delete.")
+    try:
+        browser_accounts.delete(account_id)
+        with _posts_lock:
+            _logins.pop(account_id, None)
+    finally:
+        lock.release()
+
+
 # --- Worker side ------------------------------------------------------------
 # Both studios follow the account's language, so nothing below reads visible text.
 YT_UPLOAD_URL = "https://www.youtube.com/upload"
+YT_CHANNEL_UPLOAD_URL = "https://studio.youtube.com/channel/{}/videos/upload?d=ud"
+YT_STUDIO_URL = "https://studio.youtube.com/"
+STUDIO_CHANNEL_RE = re.compile(r"^https://studio\.youtube\.com/channel/(UC[0-9A-Za-z_-]{22})")
 YT_FILE_INPUT = "input[type=file]"
 YT_TITLE = "#title-textarea #textbox"
 YT_DESCRIPTION = "#description-textarea #textbox"
@@ -176,13 +301,43 @@ def _yt_dialog_error(page) -> str:
     return ""
 
 
-def _yt_open_upload_dialog(page, file_path: str):
-    page.goto(YT_UPLOAD_URL, wait_until="domcontentloaded", timeout=60_000)
+def studio_channel(url: str) -> str:
+    match = STUDIO_CHANNEL_RE.match(str(url or ""))
+    return match.group(1) if match else ""
+
+
+def _yt_active_channel(page) -> str:
+    """The channel Studio is acting as: its own config first, the URL second."""
+    try:
+        from_config = page.evaluate(
+            "() => { try { return String((window.ytcfg && ytcfg.get && ytcfg.get('CHANNEL_ID')) || '') }"
+            " catch (e) { return '' } }")
+    except Exception:
+        from_config = ""
+    return browser_accounts.channel_id_from(from_config) or studio_channel(page.url)
+
+
+def _yt_open_upload_dialog(page, file_path: str, channel_id: str = None):
+    """Open the upload dialog, on ``channel_id`` when one is named. A file is
+    only handed over once Studio shows that channel: a Google account switches
+    between its channels, and a post must never land on the wrong one."""
+    url = YT_CHANNEL_UPLOAD_URL.format(channel_id) if channel_id else YT_UPLOAD_URL
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if _is_google_challenge(page.url):
             raise _PostFailed("Google is asking you to sign in or verify. Log in to the YouTube "
                               "profile again, then retry.")
+        if channel_id:
+            active = _yt_active_channel(page)
+            if not active:
+                page.wait_for_timeout(1000)
+                continue
+            if active != channel_id:
+                raise _PostFailed(
+                    f"YouTube Studio opened channel {active} instead of {channel_id}, so nothing was "
+                    "uploaded. Check that this login manages the channel: open the account's login "
+                    "window, switch to the channel in Studio once, and close it.")
         if page.locator(YT_FILE_INPUT).count():
             page.locator(YT_FILE_INPUT).first.set_input_files(file_path)
             return
@@ -278,7 +433,7 @@ def _yt_finish(page, title: str):
 def _youtube_flow(page, job: dict) -> dict:
     uploaded = []
     page.on("response", lambda r: uploaded.append(True) if _is_upload_complete(r) else None)
-    _yt_open_upload_dialog(page, job["file_path"])
+    _yt_open_upload_dialog(page, job["file_path"], job.get("channel_id"))
     _yt_fill_details(page, job)
     thumbnail = job.get("thumbnail_path")
     thumbnail_set = bool(thumbnail) and _yt_set_thumbnail(page, thumbnail)
@@ -294,6 +449,46 @@ def _youtube_flow(page, job: dict) -> dict:
     if thumbnail and not thumbnail_set:
         message += " YouTube Studio offered no thumbnail upload, so YouTube picked one."
     return {"success": True, "message": message, "url": url}
+
+
+def _login_flow(context, page, url: str = None) -> dict:
+    """Leave the window to the person: log in, open Studio on each channel to
+    use (switching channel from the avatar menu), then close the window. Every
+    Studio channel any tab showed is reported; nothing is clicked here."""
+    seen = []
+    closed = []
+    context.on("close", lambda *_: closed.append(True))
+    page.goto(url or YT_STUDIO_URL, wait_until="domcontentloaded", timeout=60_000)
+    deadline = time.monotonic() + LOGIN_WINDOW_SECONDS
+    while not closed and time.monotonic() < deadline:
+        pages = list(context.pages)
+        if not pages:
+            break
+        for tab in pages:
+            cid = studio_channel(tab.url)
+            if cid and cid not in seen:
+                seen.append(cid)
+        try:
+            pages[0].wait_for_timeout(1000)
+        except Exception:  # the tab or the window was closed meanwhile
+            if not context.pages:
+                break
+    return {"success": True, "channels": seen}
+
+
+def _read_flow(page, url: str) -> dict:
+    """Open a page and hand back what a person would read on it. Nothing is
+    clicked: a page that needs a login shows the login form's text, and the
+    reader says so."""
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=20_000)
+    except PlaywrightTimeoutError:
+        pass  # pages that poll never go idle; what is there is read
+    page.wait_for_timeout(1500)
+    text = page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+    return {"success": True, "title": page.title()[:300], "url": page.url,
+            "text": text[:READ_TEXT_MAX]}
 
 
 TT_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=upload"
@@ -434,20 +629,36 @@ def _run_job(job: dict) -> dict:
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
-    studio, flow = _FLOWS[job["platform"]]
+    login = job.get("mode") == "login"
     try:
         with sync_playwright() as p:
+            if login:
+                os.makedirs(job["profile_dir"], exist_ok=True)
+            elif not os.path.isdir(job["profile_dir"]):
+                return {"success": False, "message": "This account has no browser profile: log in to it first."}
             context = p.chromium.launch_persistent_context(
                 job["profile_dir"], headless=False, viewport={"width": 1280, "height": 850})
             try:
                 page = context.pages[0] if context.pages else context.new_page()
-                return flow(page, job)
+                if login:
+                    return _login_flow(context, page, job.get("url"))
+                if job.get("mode") == "read":
+                    return _read_flow(page, job["url"])
+                return _FLOWS[job["platform"]][1](page, job)
             finally:
-                context.close()
+                try:
+                    context.close()
+                except PlaywrightError:
+                    pass  # the person already closed it
     except _PostFailed as e:
         return {"success": False, "message": str(e)}
     except PlaywrightError as e:
         first_line = (str(e).strip().splitlines() or ["unknown error"])[0]
+        if login:
+            return {"success": False, "message": f"The login window failed: {first_line}"}
+        if job.get("mode") == "read":
+            return {"success": False, "message": f"The page could not be read: {first_line}"}
+        studio = _FLOWS.get(job.get("platform"), ("The studio",))[0]
         return {"success": False, "message": f"The {studio} page did not behave as expected: {first_line}"}
 
 

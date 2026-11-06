@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Loader2, Plus, Pencil, Trash2, ExternalLink, Megaphone } from 'lucide-react';
+import { Loader2, Plus, Pencil, Trash2, ExternalLink, Megaphone, Sparkles, Search } from 'lucide-react';
+import { BriefModal, BriefSummary, CampaignFinder, VideoRequirementsButton } from './BriefTools';
 import Modal from '../components/ui/Modal';
 import {
   listCampaigns, createCampaign, updateCampaign, deleteCampaign, estimatePayout, campaignReport,
@@ -29,10 +30,13 @@ const toBody = (f) => ({
   notes: f.notes || null,
 });
 
-export default function CampaignsPage() {
+export default function CampaignsPage({ geminiKey = '' }) {
   const [campaigns, setCampaigns] = useState(null);
   const [error, setError] = useState('');
-  const [editing, setEditing] = useState(null); // null | 'new' | campaign
+  const [editing, setEditing] = useState(null); // null | 'new' | campaign | {draft, brief}
+  const [analysing, setAnalysing] = useState(null); // null | 'new' | campaign
+  const [finding, setFinding] = useState(false);
+  const [openBrief, setOpenBrief] = useState(null);
 
   const load = () => {
     listCampaigns()
@@ -57,9 +61,17 @@ export default function CampaignsPage() {
         <p className="text-muted text-sm lowercase">
           Clipping programs that pay per 1,000 views. Link projects to a campaign from the project page.
         </p>
-        <button onClick={() => setEditing('new')} className="btn-primary px-3 py-2 text-xs shrink-0">
-          <Plus size={14} /> new campaign
-        </button>
+        <div className="flex flex-wrap gap-2 shrink-0 justify-end">
+          <button onClick={() => setFinding(true)} className="btn-ghost px-3 py-2 text-xs">
+            <Search size={14} /> find campaigns
+          </button>
+          <button onClick={() => setAnalysing('new')} className="btn-ghost px-3 py-2 text-xs">
+            <Sparkles size={14} /> analyse a brief
+          </button>
+          <button onClick={() => setEditing('new')} className="btn-primary px-3 py-2 text-xs">
+            <Plus size={14} /> new campaign
+          </button>
+        </div>
       </div>
 
       {error && <p className="text-danger text-sm mb-4">{error}</p>}
@@ -100,10 +112,20 @@ export default function CampaignsPage() {
                 <ExternalLink size={12} /> brief
               </a>
             )}
+            {c.brief && (
+              <div className="mt-3 pt-3 border-t border-rule">
+                <button type="button" onClick={() => setOpenBrief(openBrief === c.id ? null : c.id)} className="readout hover:text-ink">
+                  {openBrief === c.id ? 'hide brief' : 'show brief'}
+                </button>
+                {openBrief === c.id && <div className="mt-2"><BriefSummary brief={c.brief} currency={c.currency} /></div>}
+              </div>
+            )}
             <CampaignTotals campaign={c} />
             <PayoutCalculator campaign={c} />
             <div className="flex gap-2 mt-3">
               <button onClick={() => setEditing(c)} className="btn-ghost px-3 py-2 text-xs"><Pencil size={14} /> edit</button>
+              <button onClick={() => setAnalysing(c)} className="btn-ghost px-3 py-2 text-xs" title="Read the brief and fill this campaign"><Sparkles size={14} /> brief</button>
+              <VideoRequirementsButton spec={c.video_requirements} />
               <button onClick={() => handleDelete(c)} className="btn-danger px-3 py-2 text-xs"><Trash2 size={14} /> delete</button>
             </div>
           </div>
@@ -112,11 +134,35 @@ export default function CampaignsPage() {
 
       {editing && (
         <CampaignForm
-          campaign={editing === 'new' ? null : editing}
+          campaign={editing === 'new' || editing.draft ? null : editing}
+          draft={editing.draft}
+          brief={editing.brief}
+          targetId={editing.targetId}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }}
         />
       )}
+
+      {analysing && (
+        <BriefModal
+          initialUrl={analysing === 'new' ? '' : analysing.brief_url || ''}
+          geminiKey={geminiKey}
+          useLabel={analysing === 'new' ? 'create campaign' : 'review and save to this campaign'}
+          onClose={() => setAnalysing(null)}
+          onUse={(result) => {
+            const base = analysing === 'new' ? {} : analysing;
+            setAnalysing(null);
+            setEditing({
+              targetId: analysing === 'new' ? null : base.id,
+              draft: { ...toForm({ ...base }), ...Object.fromEntries(
+                Object.entries(result.campaign).map(([k, v]) => [k, v ?? ''])) },
+              brief: result.brief,
+            });
+          }}
+        />
+      )}
+
+      {finding && <CampaignFinder geminiKey={geminiKey} onClose={() => setFinding(false)} onAdded={load} />}
     </div>
   );
 }
@@ -185,8 +231,11 @@ function PayoutCalculator({ campaign }) {
   );
 }
 
-function CampaignForm({ campaign, onClose, onSaved }) {
-  const [form, setForm] = useState(campaign ? toForm(campaign) : EMPTY);
+function CampaignForm({ campaign, draft, brief, targetId, onClose, onSaved }) {
+  // draft: the form filled from an analysed brief (for a new campaign, or for
+  // the existing one targetId), saved together with the brief itself.
+  const target = campaign || (targetId ? { id: targetId } : null);
+  const [form, setForm] = useState(draft ? { ...EMPTY, ...draft } : campaign ? toForm(campaign) : EMPTY);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -196,8 +245,9 @@ function CampaignForm({ campaign, onClose, onSaved }) {
     setSaving(true);
     setError('');
     try {
-      if (campaign) await updateCampaign(campaign.id, toBody(form));
-      else await createCampaign(toBody(form));
+      const body = { ...toBody(form), ...(brief ? { brief } : {}) };
+      if (target) await updateCampaign(target.id, body);
+      else await createCampaign(body);
       onSaved();
     } catch (err) {
       setError(err?.detail || 'could not save the campaign.');
@@ -213,7 +263,7 @@ function CampaignForm({ campaign, onClose, onSaved }) {
   );
 
   return (
-    <Modal isOpen onClose={onClose} size="lg" eyebrow="CAMPAIGN" title={campaign ? 'edit campaign' : 'new campaign'}>
+    <Modal isOpen onClose={onClose} size="lg" eyebrow="CAMPAIGN" title={target ? 'edit campaign' : 'new campaign'}>
       <form onSubmit={submit} className="space-y-3">
         {input('name', 'name', { required: true, maxLength: 160 })}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

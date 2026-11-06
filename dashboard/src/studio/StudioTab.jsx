@@ -12,6 +12,7 @@ import {
 import OverviewPage from './OverviewPage';
 import ReviewQueue from './ReviewQueue';
 import CampaignsPage from './CampaignsPage';
+import RevenuePage from './RevenuePage';
 import ChannelsPage from './ChannelsPage';
 import PostsPage from './PostsPage';
 import { apiFetch } from '../lib/api';
@@ -24,6 +25,7 @@ const SECTIONS = [
   { id: 'review', label: 'review' },
   { id: 'posts', label: 'posts' },
   { id: 'campaigns', label: 'campaigns' },
+  { id: 'earnings', label: 'earnings' },
   { id: 'channels', label: 'channels' },
 ];
 
@@ -79,7 +81,8 @@ export default function StudioTab({ onReopened, geminiKey }) {
           geminiKey={geminiKey} />
       )}
       {section === 'posts' && <PostsPage />}
-      {section === 'campaigns' && <CampaignsPage />}
+      {section === 'campaigns' && <CampaignsPage geminiKey={geminiKey} />}
+      {section === 'earnings' && <RevenuePage onGo={openSection} />}
       {section === 'channels' && <ChannelsPage />}
     </div>
   );

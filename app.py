@@ -6258,6 +6258,15 @@ async def translate_clip(
         "new_video_url": f"/videos/{req.job_id}/{output_filename}"
     }
 
+class BrowserPostTarget(BaseModel):
+    """One destination of a browser post: a saved account and, on YouTube, one
+    of its channels. Title and description override the post's own."""
+    account_id: str
+    channel_id: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
 class SocialPostRequest(BaseModel):
     job_id: str
     clip_index: int
@@ -6272,10 +6281,14 @@ class SocialPostRequest(BaseModel):
     provider: str = "upload_post"  # or "browser" (browser_post.py, self-host opt-in)
     visibility: str = "public"  # browser provider only
     thumbnail: Optional[str] = None  # browser provider only: a file of the clip's thumbnails
+    # Browser provider only: where to post. Without it, the first saved account
+    # of each requested platform, on the channel its login is on.
+    targets: Optional[List[BrowserPostTarget]] = None
 
 from urllib.parse import urlparse
 
 import httpx
+import browser_accounts
 import browser_post
 
 
@@ -6366,30 +6379,162 @@ def _browser_post_allowed(request: Request) -> bool:
     self-host CORS is a wildcard)."""
     if BILLING_ENABLED or not browser_post.enabled():
         return False
-    local = ("127.0.0.1", "::1", "localhost")
-    if not request.client or request.client.host not in local:
-        return False
-    origin = request.headers.get("origin")
-    return not origin or urlparse(origin).hostname in local
+    return browser_post.is_local_request(request)
 
 
 @app.get("/api/social/browser/status")
 async def browser_post_status(request: Request):
     if not _browser_post_allowed(request):
-        return {"enabled": False, "platforms": []}
-    return {"enabled": True, "platforms": browser_post.available_platforms()}
+        return {"enabled": False, "platforms": [], "accounts": []}
+    return {"enabled": True, "platforms": browser_post.available_platforms(),
+            "playwright": browser_post.playwright_installed(),
+            "post_platforms": list(browser_post.PLATFORMS),
+            "accounts": browser_post.accounts()}
 
 
-async def _post_via_browser(req: SocialPostRequest, request: Request):
+def _require_browser_post(request: Request):
     if not _browser_post_allowed(request):
         raise HTTPException(status_code=403, detail="Browser posting is not available here")
-    unsupported = [p for p in req.platforms if p not in browser_post.available_platforms()]
+
+
+class BrowserAccountCreate(BaseModel):
+    platform: str = "youtube"
+    label: Optional[str] = None
+    open_login: bool = True
+
+
+class BrowserChannel(BaseModel):
+    id: str  # a channel id or any URL that contains one
+    name: Optional[str] = None
+
+
+class BrowserAccountUpdate(BaseModel):
+    label: Optional[str] = None
+    channels: Optional[List[BrowserChannel]] = None
+
+
+def _browser_account_or_404(account_id: str) -> dict:
+    try:
+        return browser_accounts.get(account_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+
+def _require_playwright():
+    if not browser_post.playwright_installed():
+        raise HTTPException(status_code=400, detail=(
+            "Playwright is not installed: pip install playwright && playwright install chromium"))
+
+
+def _open_browser_login(account_id: str):
+    _require_playwright()
+    try:
+        browser_post.open_login(account_id)
+    except browser_post.Busy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.get("/api/social/browser/accounts")
+async def browser_accounts_list(request: Request):
+    _require_browser_post(request)
+    return {"accounts": browser_post.accounts()}
+
+
+@app.post("/api/social/browser/accounts")
+async def browser_account_create(req: BrowserAccountCreate, request: Request):
+    """Add an account: a fresh browser profile, and a window to log in to it."""
+    _require_browser_post(request)
+    if req.open_login:
+        _require_playwright()  # before anything is made
+    try:
+        account = browser_accounts.create(req.platform, req.label or "")
+    except browser_accounts.AccountError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if req.open_login:
+        _open_browser_login(account["id"])
+    return {"account": account}
+
+
+@app.patch("/api/social/browser/accounts/{account_id}")
+async def browser_account_update(account_id: str, req: BrowserAccountUpdate, request: Request):
+    _require_browser_post(request)
+    _browser_account_or_404(account_id)
+    channels = None if req.channels is None else [c.model_dump() for c in req.channels]
+    try:
+        return {"account": browser_accounts.update(account_id, label=req.label, channels=channels)}
+    except browser_accounts.AccountError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/social/browser/accounts/{account_id}/login")
+async def browser_account_login(account_id: str, request: Request):
+    """Open the account's window again: to log back in, or to visit more channels."""
+    _require_browser_post(request)
+    _browser_account_or_404(account_id)
+    _open_browser_login(account_id)
+    return {"success": True}
+
+
+@app.delete("/api/social/browser/accounts/{account_id}")
+async def browser_account_delete(account_id: str, request: Request):
+    """Forget the account and delete its browser profile, which logs it out here."""
+    _require_browser_post(request)
+    _browser_account_or_404(account_id)
+    try:
+        browser_post.delete_account(account_id)
+    except browser_post.Busy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except browser_accounts.AccountError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True}
+
+
+BROWSER_POST_MAX_TARGETS = 10
+
+
+def _browser_post_targets(req: SocialPostRequest) -> list:
+    """The accounts and channels a browser post goes to, checked against the
+    saved accounts. 400 on anything it cannot reach."""
+    saved = {a["id"]: a for a in browser_accounts.list_accounts()}
+    available = set(browser_post.available_platforms())
+    if req.targets:
+        if len(req.targets) > BROWSER_POST_MAX_TARGETS:
+            raise HTTPException(status_code=400, detail=f"At most {BROWSER_POST_MAX_TARGETS} destinations per post")
+        chosen, seen = [], set()
+        for t in req.targets:
+            account = saved.get(t.account_id)
+            if not account or not account["has_profile"] or account["platform"] not in available:
+                raise HTTPException(status_code=400, detail=f"Browser posting cannot reach account {t.account_id}")
+            channels = {c["id"]: c["name"] for c in account["channels"]}
+            channel_id = t.channel_id or None
+            if channel_id and channel_id not in channels:
+                raise HTTPException(status_code=400, detail=(
+                    f"{account['label']} has no channel {channel_id}: add it to the account first"))
+            key = (account["id"], channel_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = f"{account['label']} · {channels[channel_id]}" if channel_id else account["label"]
+            chosen.append((account, channel_id, label, t))
+        return chosen
+    unsupported = [p for p in req.platforms if p not in available]
     if unsupported or not req.platforms:
         raise HTTPException(status_code=400, detail=(
             f"Browser posting cannot reach: {', '.join(unsupported) or 'no platform selected'}"))
+    chosen = []
+    for platform in dict.fromkeys(req.platforms):
+        account = next(a for a in saved.values() if a["platform"] == platform and a["has_profile"])
+        chosen.append((account, None, account["label"], None))
+    return chosen
+
+
+async def _post_via_browser(req: SocialPostRequest, request: Request):
+    _require_browser_post(request)
+    targets = _browser_post_targets(req)
     if req.scheduled_date:
         raise HTTPException(status_code=400, detail="Browser posting cannot schedule yet")
-    refused = [p for p in req.platforms if req.visibility not in browser_post.VISIBILITIES[p]]
+    target_platforms = dict.fromkeys(account["platform"] for account, *_ in targets)
+    refused = [p for p in target_platforms if req.visibility not in browser_post.VISIBILITIES[p]]
     if refused:
         raise HTTPException(status_code=400, detail=(
             f"{', '.join(refused)} cannot post as {req.visibility}"))
@@ -6415,14 +6560,21 @@ async def _post_via_browser(req: SocialPostRequest, request: Request):
     title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title') or 'Viral Short'
     description = (req.description or clip.get('video_description_for_instagram')
                    or clip.get('video_description_for_tiktok') or '')
+    jobs_out = []
+    for account, channel_id, label, override in targets:
+        t_title = (override.title if override and override.title else None) or title
+        t_description = (override.description if override and override.description else None) or description
+        jobs_out.append({
+            "platform": account["platform"], "account_id": account["id"], "channel_id": channel_id,
+            "label": label, "profile_dir": browser_accounts.profile_dir(browser_accounts.get(account["id"])),
+            "title": browser_post.clean_text(youtube_title(t_title), YOUTUBE_TITLE_MAX),
+            "description": browser_post.clean_text(t_description, 5000),
+        })
     request_id = browser_post.start(
-        list(dict.fromkeys(req.platforms)), file_path=os.path.abspath(file_path),
-        title=browser_post.clean_text(youtube_title(title), YOUTUBE_TITLE_MAX),
-        description=browser_post.clean_text(description, 5000),
-        visibility=req.visibility,
+        jobs_out, file_path=os.path.abspath(file_path), visibility=req.visibility,
         thumbnail_path=os.path.abspath(thumbnail_path) if thumbnail_path else None,
     )
-    return {"success": True, "request_id": request_id}
+    return {"success": True, "request_id": request_id, "targets": [j["label"] for j in jobs_out]}
 
 
 @app.post("/api/social/post")
