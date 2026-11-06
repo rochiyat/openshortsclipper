@@ -2,7 +2,7 @@
 
 An alternative to Upload-Post for self-host: `browser_post.py` publishes a clip by
 driving the platform's own web UI with Playwright, using a browser profile that is
-already logged in on this machine. YouTube only so far, "publish now" only.
+already logged in on this machine. YouTube and TikTok so far, "publish now" only.
 
 ## Turning it on
 
@@ -23,8 +23,10 @@ The post modal then offers "post with: upload-post / browser".
 `/api/social/post` with `provider: "browser"` returns a `browser_…` request id at
 once, and a thread runs `python browser_post.py --worker` (job as JSON on stdin,
 result as JSON on stdout). `/api/social/post-status/{id}` answers from memory, in
-the same shape as Upload-Post, so a restart forgets posts in progress. Uploads to
-one platform run one at a time, because a profile can only be open once.
+the same shape as Upload-Post, so a restart forgets posts in progress. A post to
+several platforms runs them one after the other, one worker each, and fails if any
+fails while each result says which went out. Uploads to one platform run one at a
+time, because a profile can only be open once.
 
 ## Rules
 
@@ -42,9 +44,16 @@ one platform run one at a time, because a profile can only be open once.
   stays in the page, so "the dialog closed" alone is not the signal.
 - "Made for kids" is the channel owner's declaration: a channel default is kept,
   and only an unanswered question is set to "not made for kids".
+- TikTok's Post is pressed once, because pressing it twice could post twice. The upload
+  page closing is the confirmation; without it the result says to check Studio before
+  posting again. A dialog after Post is reported, never answered: it may be a content
+  warning that is the user's to accept. Selectors use `data-e2e`, and the caption is
+  read back and compared before anything is posted.
+- TikTok's visibilities are public, friends and private; YouTube's are public, unlisted
+  and private. A post to both offers only what both can do.
 - A chosen thumbnail is handed to Studio's own file input before Next. Custom Shorts
   thumbnails reach channels gradually, so a channel without the input still posts the
-  video and the result says YouTube picked the thumbnail.
+  video and the result says YouTube picked the thumbnail. TikTok does not take one yet.
 
 ## Limits
 

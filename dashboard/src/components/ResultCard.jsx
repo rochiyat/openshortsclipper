@@ -38,8 +38,11 @@ async function followPost(requestId, tries = 12, everyMs = 5000) {
             .map((x) => `${x.platform}${x.message ? `: ${x.message}` : ''}`);
         if (d.status !== 'completed' && !failed.length) failed.push('every platform');
         const url = (d.results || []).find((x) => x.url)?.url || null;
-        const message = (d.results || []).find((x) => x.success && x.message)?.message || null;
-        return { done: d.status === 'completed', failed, url, message };
+        const succeeded = (d.results || []).filter((x) => x.success);
+        const message = succeeded.length > 1
+            ? succeeded.map((x) => `${x.platform}: ${x.message}`).join(' ')
+            : succeeded[0]?.message || null;
+        return { done: d.status === 'completed', failed, url, message, posted: succeeded.map((x) => x.platform) };
     }
     return { done: false, failed: [] };
 }
@@ -53,11 +56,10 @@ const PROVIDER_OPTIONS = [
     { value: 'browser', label: 'browser', hint: 'playwright' },
 ];
 
-const VISIBILITY_OPTIONS = [
-    { value: 'public', label: 'public' },
-    { value: 'unlisted', label: 'unlisted' },
-    { value: 'private', label: 'private' },
-];
+const VISIBILITY_BY_PLATFORM = {
+    youtube: ['public', 'unlisted', 'private'],
+    tiktok: ['public', 'friends', 'private'],
+};
 
 const PLATFORM_OPTIONS = [
     { value: 'tiktok', label: 'tiktok', icon: <Video size={16} /> },
@@ -322,6 +324,16 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const uploadPostPlatforms = () => (knownConnections
         ? { tiktok: connectedPlatforms.includes('tiktok'), instagram: connectedPlatforms.includes('instagram'), youtube: connectedPlatforms.includes('youtube') }
         : { tiktok: true, instagram: true, youtube: true });
+
+    // Only what every selected platform can do. A choice that stops being
+    // possible falls back to private, never to something more visible.
+    const visibilityChoices = Object.keys(VISIBILITY_BY_PLATFORM)
+        .filter((p) => platforms[p])
+        .reduce((common, p) => common.filter((v) => VISIBILITY_BY_PLATFORM[p].includes(v)), ['public', 'unlisted', 'friends', 'private']);
+    useEffect(() => {
+        if (viaBrowser && !visibilityChoices.includes(visibility)) setVisibility('private');
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [viaBrowser, platforms]);
 
     const chooseProvider = (next) => {
         setProvider(next);
@@ -832,9 +844,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             // A 200 only means Upload-Post took the file: follow the post to
             // its real end, so a platform that fails says so here.
             setPostResult({ success: true, msg: viaBrowser ? "Uploading in a Chrome window: leave it open until it closes." : "Publishing…" });
-            const outcome = viaBrowser ? await followPost(sent.request_id, BROWSER_POST_TRIES) : await followPost(sent.request_id);
+            const outcome = viaBrowser ? await followPost(sent.request_id, BROWSER_POST_TRIES * selectedPlatforms.length) : await followPost(sent.request_id);
             if (outcome.failed.length) {
-                setPostResult({ success: false, msg: `Failed on ${outcome.failed.join('; ')}` });
+                const alsoPosted = outcome.posted?.length ? ` Already posted on ${outcome.posted.join(', ')}.` : '';
+                setPostResult({ success: false, msg: `Failed on ${outcome.failed.join('; ')}.${alsoPosted}`, url: outcome.url });
                 track('SocialPostFailed', { props: { platforms: selectedPlatforms.join(',') } });
             } else if (viaBrowser && outcome.done) {
                 // Stays open so the link to the new video can be followed.
@@ -1211,7 +1224,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             <SegmentedControl options={PROVIDER_OPTIONS} value={provider} onChange={chooseProvider} />
                             {viaBrowser && (
                                 <p className="text-xs text-muted leading-snug mt-2 lowercase">
-                                    Uses the account logged in on this computer. A Chrome window opens and uploads through YouTube Studio.
+                                    Uses the accounts logged in on this computer. A Chrome window opens for each platform and uploads through its studio.
                                 </p>
                             )}
                         </div>
@@ -1242,12 +1255,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
                     {viaBrowser && (
                         <div>
-                            <label className="eyebrow block mb-2">YOUTUBE VISIBILITY</label>
-                            <SegmentedControl options={VISIBILITY_OPTIONS} value={visibility} onChange={setVisibility} />
+                            <label className="eyebrow block mb-2">VISIBILITY</label>
+                            <SegmentedControl options={visibilityChoices.map((v) => ({ value: v, label: v }))} value={visibility} onChange={setVisibility} />
                         </div>
                     )}
 
-                    {viaBrowser && (
+                    {viaBrowser && platforms.youtube && (
                         <div>
                             <div className="flex items-center justify-between gap-2 mb-2">
                                 <label className="eyebrow">YOUTUBE THUMBNAIL</label>

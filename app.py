@@ -6389,8 +6389,10 @@ async def _post_via_browser(req: SocialPostRequest, request: Request):
             f"Browser posting cannot reach: {', '.join(unsupported) or 'no platform selected'}"))
     if req.scheduled_date:
         raise HTTPException(status_code=400, detail="Browser posting cannot schedule yet")
-    if req.visibility not in browser_post.VISIBILITIES:
-        raise HTTPException(status_code=400, detail="Invalid visibility")
+    refused = [p for p in req.platforms if req.visibility not in browser_post.VISIBILITIES[p]]
+    if refused:
+        raise HTTPException(status_code=400, detail=(
+            f"{', '.join(refused)} cannot post as {req.visibility}"))
 
     await _ensure_job_files(req.job_id, request)
     clips = ((jobs.get(req.job_id) or {}).get('result') or {}).get('clips')
@@ -6414,7 +6416,7 @@ async def _post_via_browser(req: SocialPostRequest, request: Request):
     description = (req.description or clip.get('video_description_for_instagram')
                    or clip.get('video_description_for_tiktok') or '')
     request_id = browser_post.start(
-        req.platforms[0], file_path=os.path.abspath(file_path),
+        list(dict.fromkeys(req.platforms)), file_path=os.path.abspath(file_path),
         title=browser_post.clean_text(youtube_title(title), YOUTUBE_TITLE_MAX),
         description=browser_post.clean_text(description, 5000),
         visibility=req.visibility,
