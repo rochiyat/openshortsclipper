@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, Check, X, RotateCcw, ChevronLeft, ChevronRight, ShieldAlert, Save, Film, Send, Upload, Sparkles } from 'lucide-react';
+import { Loader2, Check, X, RotateCcw, ChevronLeft, ChevronRight, ShieldAlert, Save, Film, Send, Upload, Sparkles, ListChecks } from 'lucide-react';
 import RecordPostModal from './RecordPostModal';
 import PublishModal from './PublishModal';
 import {
   listClips, updateClip, updateProject, listCampaigns, mediaUrl, RIGHTS_OPTIONS, rewriteClip,
-  REWRITE_LANGUAGES,
+  REWRITE_LANGUAGES, checkClipBrief,
 } from './api';
+
+const CHECK_BADGE = { pass: 'badge-ok', fail: 'badge-danger', unclear: 'badge-brass' };
 
 const STATUSES = ['draft', 'approved', 'rejected', 'posted'];
 const FIELDS = ['title', 'hook_text', 'caption', 'hashtags'];
@@ -30,6 +32,7 @@ export default function ReviewQueue({ initialProjectId = '', onCountsChange, gem
   const [rewriteLang, setRewriteLang] = useState('id');
   const [rewriting, setRewriting] = useState(false);
   const [notice, setNotice] = useState('');
+  const [check, setCheck] = useState(null); // {clipId, verdict, items, note} | {clipId, loading}
 
   useEffect(() => {
     listCampaigns().then((d) => setCampaigns(d.campaigns || [])).catch(() => {});
@@ -244,7 +247,44 @@ export default function ReviewQueue({ initialProjectId = '', onCountsChange, gem
                 >
                   {rewriting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} rewrite copy
                 </button>
+                {clip.project.campaign_id && (
+                  <button
+                    type="button"
+                    disabled={check?.loading || !!busy}
+                    className="btn-ghost px-3 py-1.5 text-xs"
+                    title={`Check the saved copy and length against the brief of ${clip.project.campaign_name}`}
+                    onClick={async () => {
+                      setCheck({ clipId: clip.id, loading: true });
+                      setError('');
+                      try {
+                        setCheck({ clipId: clip.id, ...(await checkClipBrief(clip.id, geminiKey)) });
+                      } catch (e) {
+                        setCheck(null);
+                        setError(e?.detail || 'could not check the clip.');
+                      }
+                    }}
+                  >
+                    {check?.loading ? <Loader2 size={12} className="animate-spin" /> : <ListChecks size={12} />} check brief
+                  </button>
+                )}
                 {dirty && <span className="readout">unsaved changes</span>}
+              </div>
+            )}
+
+            {check && check.clipId === clip.id && !check.loading && (
+              <div className="mt-3 p-3 rounded-input bg-paper3 space-y-1.5">
+                <p className="text-sm text-ink">
+                  brief check: <span className={CHECK_BADGE[check.verdict]}>{check.verdict}</span>
+                  {dirty && <span className="readout ml-2">checks the saved copy: save first</span>}
+                </p>
+                {check.items.length === 0 && <p className="readout">the brief has no rule to check.</p>}
+                {check.items.map((it) => (
+                  <p key={`${it.source}-${it.rule}`} className="text-xs text-ink2 flex items-start gap-2">
+                    <span className={`${CHECK_BADGE[it.status]} shrink-0`}>{it.status}</span>
+                    <span>{it.rule}{it.note && <span className="text-muted"> · {it.note}</span>}</span>
+                  </p>
+                ))}
+                <p className="readout">{check.note}</p>
               </div>
             )}
 

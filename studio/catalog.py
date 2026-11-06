@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import storage
+from . import campaign_ai, storage
 from .models import (CAMPAIGN_STATUSES, PLATFORMS, PUBLISHERS, Campaign, Channel,
                      Clip, Project, now_iso)
 from .projects import StudioError
@@ -202,6 +202,8 @@ def campaign_out(c: Campaign, stats: Optional[dict] = None) -> dict:
         "min_views": c.min_views, "max_payout": c.max_payout,
         "starts_at": c.starts_at, "ends_at": c.ends_at,
         "donation_pct": c.donation_pct, "status": c.status, "notes": c.notes,
+        "brief": c.brief or None,
+        "video_requirements": campaign_ai.video_requirements_from(c.brief) if c.brief else None,
         "created_at": c.created_at, "updated_at": c.updated_at,
     }
     if stats is not None:
@@ -242,6 +244,11 @@ def _apply_campaign(c: Campaign, data: dict, creating: bool):
         c.status = status
     if "notes" in data:
         c.notes = _text(data.get("notes"), 4000, "notes")
+    if "brief" in data:
+        brief = data.get("brief")
+        if brief is not None and not isinstance(brief, dict):
+            raise StudioError("brief must be an object")
+        c.brief_json = json.dumps(campaign_ai.clean_brief(brief), ensure_ascii=False) if brief else None
 
 
 def campaign_stats(s: Session, campaign_ids) -> dict:

@@ -184,3 +184,29 @@ export const REWRITE_LANGUAGES = [
   { value: 'jv', label: 'javanese' },
   { value: 'su', label: 'sundanese' },
 ];
+
+// ---- campaign briefs, recommendations, revenue (studio/campaign_ai.py, revenue.py) ----
+const withKey = (geminiKey, body) => ({
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', ...(geminiKey ? { 'X-Gemini-Key': geminiKey } : {}) },
+  body: JSON.stringify(body),
+});
+// A page is read in the logged-in konten.com browser when only a url is given.
+export const analyseBrief = ({ url = '', text = '' }, geminiKey = '') =>
+  apiJson('/api/studio/campaign-ai/brief', withKey(geminiKey, { url: url || null, text: text || null }));
+export const readCampaignList = ({ url = '', text = '' }, geminiKey = '') =>
+  apiJson('/api/studio/campaign-ai/list', withKey(geminiKey, { url: url || null, text: text || null }));
+export const recommendCampaigns = ({ prompt, candidates = [] }, geminiKey = '') =>
+  apiJson('/api/studio/campaign-ai/recommend', withKey(geminiKey, { prompt, candidates }));
+export const checkClipBrief = (clipId, geminiKey = '') =>
+  apiJson(`/api/studio/campaign-ai/check/${clipId}`, withKey(geminiKey, {}));
+export const revenueInsights = () => apiJson('/api/studio/revenue');
+
+// The Clip Generator reads this on mount (MediaInput): the next job uses it.
+// A logo already picked there is kept.
+export const applyVideoRequirements = (spec) => {
+  let current = {};
+  try { current = JSON.parse(localStorage.getItem('os_video_requirements')) || {}; } catch { current = {}; }
+  const next = { ...(current.logo ? { logo: current.logo, logo_position: current.logo_position, logo_width: current.logo_width } : {}), ...spec };
+  try { localStorage.setItem('os_video_requirements', JSON.stringify(next)); return true; } catch { return false; }
+};

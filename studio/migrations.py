@@ -172,6 +172,11 @@ MIGRATIONS = [
         # Free-form project tags, stored as a JSON array of lowercase strings.
         "ALTER TABLE projects ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
     ]),
+    (6, [
+        # The campaign's brief as read by a model and reviewed by the user
+        # (studio/campaign_ai.clean_brief shape), JSON.
+        "ALTER TABLE campaigns ADD COLUMN brief TEXT",
+    ]),
 ]
 
 LATEST = MIGRATIONS[-1][0]

@@ -158,8 +158,13 @@ class Campaign(Base):
     donation_pct: Mapped[float] = mapped_column(Float, default=0)
     status: Mapped[str] = mapped_column(String, default="active")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    brief_json: Mapped[str | None] = mapped_column("brief", Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, default=now_iso)
     updated_at: Mapped[str] = mapped_column(String, default=now_iso)
+
+    @property
+    def brief(self) -> dict:
+        return _json_dict(self.brief_json)
 
 
 class Post(Base):

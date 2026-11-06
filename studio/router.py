@@ -9,10 +9,11 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import (catalog, copywriter, db, posts, projects, publishers, publishing, review,
-               scheduler, storage, summary, youtube_oauth)
+from . import (campaign_ai, catalog, copywriter, db, posts, projects, publishers, publishing,
+               revenue, review, scheduler, storage, summary, youtube_oauth)
 from .models import Clip, Post, Project, PublishJob, now_iso
 from .projects import JobBridge, StudioError
 
@@ -163,6 +164,7 @@ class CampaignRequest(BaseModel):
     donation_pct: Optional[float] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+    brief: Optional[dict] = None  # campaign_ai.clean_brief shape; null clears it
 
 
 def _sent(model: BaseModel, exclude=()) -> dict:
@@ -764,3 +766,176 @@ def backup_run():
         raise HTTPException(status_code=400, detail="Set STUDIO_BACKUP_BUCKET and its access keys first")
     started = scheduler.trigger_backup()
     return {"started": started, **scheduler.backup_status()}
+
+
+# ---- campaign briefs, recommendations, revenue --------------------------------
+# A brief or a campaign list is either pasted, or read from a page through a
+# browser account logged in on this machine (browser_post.read_page). Reading
+# acts as that login, so it answers only locally and only for allowed hosts.
+
+class PageRequest(BaseModel):
+    url: Optional[str] = None
+    text: Optional[str] = None
+    account_id: Optional[str] = None  # a "konten" browser account; default the first
+
+
+def read_hosts() -> tuple:
+    raw = os.environ.get("CAMPAIGN_READ_HOSTS", "konten.com")
+    return tuple(h.strip().lower().lstrip(".") for h in raw.split(",") if h.strip())
+
+
+def _host_allowed(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in read_hosts())
+
+
+def _page_text(req: PageRequest, request: Request) -> tuple:
+    """(text, url, title) from pasted text, or the page read in the browser."""
+    text = (req.text or "").strip()
+    url = (req.url or "").strip()
+    if text:
+        return text, url, ""
+    if not url:
+        raise HTTPException(status_code=400, detail="Paste the text or give the page's URL")
+    import browser_accounts
+    import browser_post
+    if not (browser_post.enabled() and browser_post.is_local_request(request)):
+        raise HTTPException(status_code=403, detail=(
+            "Reading a page needs browser posting on this machine (BROWSER_POST_ENABLED=1); "
+            "paste the text instead"))
+    if urlparse(url).scheme != "https" or not _host_allowed(url):
+        raise HTTPException(status_code=400, detail=(
+            f"Only pages on {', '.join(read_hosts())} are read (CAMPAIGN_READ_HOSTS); paste the text instead"))
+    try:
+        import security_utils
+        security_utils.assert_public_url(url)
+    except Exception:
+        raise HTTPException(status_code=400, detail="That URL does not point to a public site")
+    accounts = [a for a in browser_accounts.list_accounts() if a["platform"] == "konten" and a["has_profile"]]
+    account = next((a for a in accounts if a["id"] == req.account_id), None) if req.account_id \
+        else (accounts[0] if accounts else None)
+    if account is None:
+        raise HTTPException(status_code=400, detail="Add a konten.com account and log in to it first")
+    if not browser_post.playwright_installed():
+        raise HTTPException(status_code=400, detail="Playwright is not installed on this machine")
+    page = browser_post.read_page(account["id"], url)
+    if not page.get("success"):
+        raise HTTPException(status_code=502, detail=page.get("message") or "The page could not be read")
+    if not (page.get("text") or "").strip():
+        raise HTTPException(status_code=502, detail="The page showed no text: log in to the account again")
+    return page["text"], page.get("url") or url, page.get("title") or ""
+
+
+def _gemini_key(request: Request) -> Optional[str]:
+    return request.headers.get("X-Gemini-Key")
+
+
+@router.post("/campaign-ai/brief")
+def analyse_brief(req: PageRequest, request: Request):
+    """A brief read by the model: campaign fields, rules, and video requirements.
+    Nothing is saved; the dashboard fills the campaign form with it."""
+    text, url, title = _page_text(req, request)
+    try:
+        out = campaign_ai.extract_brief(text, url, _gemini_key(request))
+    except campaign_ai.AIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if url and "brief_url" not in out["campaign"]:
+        out["campaign"]["brief_url"] = url
+    return {**out, "page_title": title, "source": "page" if not (req.text or "").strip() else "text"}
+
+
+@router.post("/campaign-ai/list")
+def read_campaign_list(req: PageRequest, request: Request):
+    """Campaigns listed on a page (or pasted), to pick from and add. Not saved."""
+    text, url, _title = _page_text(req, request)
+    try:
+        return {"campaigns": campaign_ai.extract_list(text, url, _gemini_key(request))}
+    except campaign_ai.AIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+class RecommendRequest(BaseModel):
+    prompt: str
+    campaign_ids: Optional[list] = None   # saved campaigns; default every active one
+    candidates: Optional[list] = None     # unsaved ones (from /campaign-ai/list)
+
+
+def _creator_profile(s: Session) -> dict:
+    channels = [{"name": c.name, "platform": c.platform, "language": c.language}
+                for c in catalog.list_channels(s)]
+    rows = s.scalars(select(Post).where(Post.status == "live")).unique().all()
+    snaps = posts.snapshots_for(s, [p.id for p in rows])
+    views = [(p.platform, posts.summarize(snaps[p.id])["views"]) for p in rows]
+    return campaign_ai.creator_profile(channels, views)
+
+
+def _saved_for_ranking(c) -> dict:
+    b = c.brief or {}
+    return {"id": c.id, "name": c.name, "cpm": c.cpm, "currency": c.currency, "min_views": c.min_views,
+            "max_payout": c.max_payout, "ends_at": c.ends_at, "platforms": b.get("platforms") or [],
+            "niche": b.get("niche") or "", "language": b.get("language") or "",
+            "summary": b.get("summary") or c.notes or "", "saved": True}
+
+
+@router.post("/campaign-ai/recommend")
+def recommend(req: RecommendRequest, request: Request, s: Session = Depends(db.get_session)):
+    """Campaigns ranked for what the creator wrote: the model's fit and reasons,
+    with the payout a typical post of theirs would earn computed from their own views."""
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Describe your channels and what you like to clip")
+    if req.campaign_ids:
+        saved = [c for c in catalog.list_campaigns(s) if c.id in set(map(str, req.campaign_ids))]
+    else:
+        saved = catalog.list_campaigns(s, "active")
+    items = [_saved_for_ranking(c) for c in saved]
+    for n, c in enumerate(req.candidates or []):
+        if not isinstance(c, dict) or not c.get("name"):
+            continue
+        cleaned = campaign_ai.clean_brief({**c, "is_brief": True})
+        items.append({"id": f"new-{n}", "name": cleaned["name"] or str(c.get("name"))[:160],
+                      "cpm": cleaned["cpm"], "currency": cleaned["currency"], "min_views": cleaned["min_views"],
+                      "max_payout": cleaned["max_payout"], "ends_at": cleaned["ends_at"],
+                      "platforms": cleaned["platforms"], "niche": cleaned["niche"],
+                      "summary": cleaned["summary"] or str(c.get("summary") or "")[:400],
+                      "url": str(c.get("url") or "")[:500], "saved": False})
+    if not items:
+        raise HTTPException(status_code=400, detail="No campaign to rank: add or read some first")
+    profile = _creator_profile(s)
+    s.commit()  # release the DB before a slow model call
+    try:
+        ranked = campaign_ai.rank(prompt, items, profile, _gemini_key(request))
+    except campaign_ai.AIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"ranked": ranked, "profile": profile}
+
+
+@router.post("/campaign-ai/check/{clip_id}")
+def check_clip(clip_id: str, request: Request, campaign_id: str = "", s: Session = Depends(db.get_session)):
+    """The clip's copy and length against its campaign's brief (the project's
+    campaign unless one is named)."""
+    try:
+        clip = review.get_clip(s, clip_id)
+        cid = campaign_id or (clip.project.campaign_id if clip.project else None)
+        if not cid:
+            raise StudioError("Link the project to a campaign first")
+        campaign = catalog.get_campaign(s, cid)
+    except StudioError as e:
+        _raise(e)
+    if not campaign.brief:
+        raise HTTPException(status_code=400, detail="This campaign has no brief yet: analyse it first")
+    _score, why = _selection_notes(clip)
+    data = {"title": clip.title, "hook_text": clip.hook_text, "caption": clip.caption,
+            "hashtags": clip.hashtags, "duration": clip.duration, "why_picked": why}
+    brief = campaign.brief
+    s.commit()
+    try:
+        return {"campaign_id": campaign.id, **campaign_ai.check_clip(brief, data, _gemini_key(request))}
+    except campaign_ai.AIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/revenue")
+def revenue_insights(s: Session = Depends(db.get_session)):
+    """Earnings per campaign and what to do next, from recorded posts and views."""
+    return revenue.insights(s)

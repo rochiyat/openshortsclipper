@@ -19,6 +19,8 @@ The post modal then offers "post with: upload-post / browser".
 
 ## Accounts and channels (`browser_accounts.py`)
 
+Accounts of platform `konten` are only read, for campaign briefs (`docs/architecture/campaign-ai.md`).
+
 Each account is one persistent browser profile, saved in
 `<root>/browser_accounts.json` with its profile at
 `<root>/browser-accounts/<id>/browser_profile`. A profile from before the registry

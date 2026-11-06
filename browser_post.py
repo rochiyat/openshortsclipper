@@ -24,7 +24,11 @@ import browser_accounts
 
 _TRUE = ("1", "true", "yes", "on")
 
-PLATFORMS = browser_accounts.PLATFORMS
+PLATFORMS = browser_accounts.POST_PLATFORMS
+# Where a login window opens, per account platform.
+LOGIN_URLS = {"youtube": "https://studio.youtube.com/",
+              "konten": os.environ.get("KONTEN_URL", "https://konten.com/")}
+LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
 VISIBILITIES = ("public", "unlisted", "private")
 REQUEST_PREFIX = "browser_"
 
@@ -46,6 +50,16 @@ _logins: dict = {}
 
 def enabled() -> bool:
     return os.environ.get("BROWSER_POST_ENABLED", "").strip().lower() in _TRUE
+
+
+def is_local_request(request) -> bool:
+    """From this machine, and not from a web page on another site (the API's
+    self-host CORS is a wildcard). A logged-in browser answers to nothing else."""
+    from urllib.parse import urlparse
+    if not request.client or request.client.host not in LOCAL_HOSTS:
+        return False
+    origin = request.headers.get("origin")
+    return not origin or urlparse(origin).hostname in LOCAL_HOSTS
 
 
 def playwright_installed() -> bool:
@@ -176,7 +190,8 @@ def open_login(account_id: str):
     with _posts_lock:
         _logins[account_id] = {"status": "open", "message": None}
     job = {"mode": "login", "platform": account["platform"],
-           "profile_dir": browser_accounts.profile_dir(account)}
+           "profile_dir": browser_accounts.profile_dir(account),
+           "url": LOGIN_URLS.get(account["platform"], LOGIN_URLS["youtube"])}
 
     def run():
         try:
@@ -191,10 +206,15 @@ def open_login(account_id: str):
                 except KeyError:  # deleted while the window was open
                     pass
             found = len(channels)
-            message = (result.get("message") if not result.get("success")
-                       else f"{found} channel{'s' if found != 1 else ''} seen in YouTube Studio."
-                       if found else "No YouTube Studio channel was seen: add channels by hand, "
-                                     "or open the window again and visit YouTube Studio.")
+            if not result.get("success"):
+                message = result.get("message")
+            elif account["platform"] != "youtube":
+                message = "Login window closed."
+            elif found:
+                message = f"{found} channel{'s' if found != 1 else ''} seen in YouTube Studio."
+            else:
+                message = ("No YouTube Studio channel was seen: add channels by hand, "
+                           "or open the window again and visit YouTube Studio.")
             with _posts_lock:
                 _logins[account_id] = {"status": "done" if result.get("success") else "failed",
                                        "message": message}
@@ -202,6 +222,21 @@ def open_login(account_id: str):
             lock.release()
 
     threading.Thread(target=run, name=f"browser-login-{account_id}", daemon=True).start()
+
+
+READ_TIMEOUT_SECONDS = 3 * 60
+READ_TEXT_MAX = 60_000
+
+
+def read_page(account_id: str, url: str) -> dict:
+    """The visible text of ``url`` opened in the account's logged-in profile,
+    for a brief or a campaign list. Blocking; waits while the profile is busy.
+    Returns {success, title, url, text} or {success: False, message}."""
+    account = browser_accounts.get(account_id)
+    job = {"mode": "read", "platform": account["platform"],
+           "profile_dir": browser_accounts.profile_dir(account), "url": url}
+    with _profile_lock(account_id):
+        return _run_worker(job, timeout=READ_TIMEOUT_SECONDS)
 
 
 def delete_account(account_id: str):
@@ -412,14 +447,14 @@ def _youtube_flow(page, job: dict) -> dict:
     return {"success": True, "message": message, "url": url}
 
 
-def _login_flow(context, page) -> dict:
+def _login_flow(context, page, url: str = None) -> dict:
     """Leave the window to the person: log in, open Studio on each channel to
     use (switching channel from the avatar menu), then close the window. Every
     Studio channel any tab showed is reported; nothing is clicked here."""
     seen = []
     closed = []
     context.on("close", lambda *_: closed.append(True))
-    page.goto(YT_STUDIO_URL, wait_until="domcontentloaded", timeout=60_000)
+    page.goto(url or YT_STUDIO_URL, wait_until="domcontentloaded", timeout=60_000)
     deadline = time.monotonic() + LOGIN_WINDOW_SECONDS
     while not closed and time.monotonic() < deadline:
         pages = list(context.pages)
@@ -437,6 +472,21 @@ def _login_flow(context, page) -> dict:
     return {"success": True, "channels": seen}
 
 
+def _read_flow(page, url: str) -> dict:
+    """Open a page and hand back what a person would read on it. Nothing is
+    clicked: a page that needs a login shows the login form's text, and the
+    reader says so."""
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=20_000)
+    except PlaywrightTimeoutError:
+        pass  # pages that poll never go idle; what is there is read
+    page.wait_for_timeout(1500)
+    text = page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+    return {"success": True, "title": page.title()[:300], "url": page.url,
+            "text": text[:READ_TEXT_MAX]}
+
+
 def _run_job(job: dict) -> dict:
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -446,11 +496,17 @@ def _run_job(job: dict) -> dict:
         with sync_playwright() as p:
             if login:
                 os.makedirs(job["profile_dir"], exist_ok=True)
+            elif not os.path.isdir(job["profile_dir"]):
+                return {"success": False, "message": "This account has no browser profile: log in to it first."}
             context = p.chromium.launch_persistent_context(
                 job["profile_dir"], headless=False, viewport={"width": 1280, "height": 850})
             try:
                 page = context.pages[0] if context.pages else context.new_page()
-                return _login_flow(context, page) if login else _youtube_flow(page, job)
+                if login:
+                    return _login_flow(context, page, job.get("url"))
+                if job.get("mode") == "read":
+                    return _read_flow(page, job["url"])
+                return _youtube_flow(page, job)
             finally:
                 try:
                     context.close()
@@ -462,6 +518,8 @@ def _run_job(job: dict) -> dict:
         first_line = (str(e).strip().splitlines() or ["unknown error"])[0]
         if login:
             return {"success": False, "message": f"The login window failed: {first_line}"}
+        if job.get("mode") == "read":
+            return {"success": False, "message": f"The page could not be read: {first_line}"}
         return {"success": False, "message": f"The YouTube Studio page did not behave as expected: {first_line}"}
 
 

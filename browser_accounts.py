@@ -18,7 +18,9 @@ import threading
 import time
 import uuid
 
-PLATFORMS = ("youtube",)
+# youtube posts; konten (konten.com) is only read, for campaign briefs.
+PLATFORMS = ("youtube", "konten")
+POST_PLATFORMS = ("youtube",)
 REGISTRY_NAME = "browser_accounts.json"
 ACCOUNTS_DIR = "browser-accounts"
 CHANNEL_ID_RE = re.compile(r"UC[0-9A-Za-z_-]{22}")

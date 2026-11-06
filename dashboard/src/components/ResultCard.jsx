@@ -356,7 +356,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
             setBrowserPlatforms(d?.enabled && d.playwright ? (d.platforms || []) : null);
-            const accounts = d?.enabled ? (d.accounts || []) : [];
+            // konten.com accounts are only read (campaign briefs), never posted to.
+            const postable = new Set(d?.post_platforms || ['youtube']);
+            const accounts = d?.enabled ? (d.accounts || []).filter((a) => postable.has(a.platform)) : [];
             setBrowserAccounts(accounts);
             // Drop picks whose account or channel no longer exists.
             const valid = new Set(accounts.filter((a) => a.has_profile).flatMap(accountTargets).map(targetKey));

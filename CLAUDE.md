@@ -49,6 +49,7 @@ Ingest (yt-dlp or upload) → transcription (word timestamps) → scene detectio
 - Concurrency/VRAM, auto-retry, deploy handover and drain → `docs/architecture/jobs-and-deploys.md`
 - Download routing, yt-dlp clients, paid proxy ledger → `docs/architecture/proxy-routing.md`
 - Posting through a logged-in browser (Playwright, self-host opt-in) → `docs/architecture/browser-posting.md`
+- Campaign briefs, campaign recommendations, earnings advice (Studio) → `docs/architecture/campaign-ai.md`
 
 ## Hard rules
 

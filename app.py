@@ -6379,11 +6379,7 @@ def _browser_post_allowed(request: Request) -> bool:
     self-host CORS is a wildcard)."""
     if BILLING_ENABLED or not browser_post.enabled():
         return False
-    local = ("127.0.0.1", "::1", "localhost")
-    if not request.client or request.client.host not in local:
-        return False
-    origin = request.headers.get("origin")
-    return not origin or urlparse(origin).hostname in local
+    return browser_post.is_local_request(request)
 
 
 @app.get("/api/social/browser/status")
@@ -6392,6 +6388,7 @@ async def browser_post_status(request: Request):
         return {"enabled": False, "platforms": [], "accounts": []}
     return {"enabled": True, "platforms": browser_post.available_platforms(),
             "playwright": browser_post.playwright_installed(),
+            "post_platforms": list(browser_post.PLATFORMS),
             "accounts": browser_post.accounts()}
 
 
