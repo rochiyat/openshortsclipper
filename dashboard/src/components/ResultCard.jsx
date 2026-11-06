@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Image as ImageIcon } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
@@ -11,6 +11,8 @@ import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import TikTokDraftNotice from './TikTokDraftNotice';
+import BrowserAccountsPicker from './BrowserAccountsPicker';
+import { accountTargets, targetKey } from '../lib/browserTargets';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
@@ -35,11 +37,13 @@ async function followPost(requestId, tries = 12, everyMs = 5000) {
         if (!POST_TERMINAL.has(d.status)) continue;
         const failed = (d.results || [])
             .filter((x) => x.success === false)
-            .map((x) => `${x.platform}${x.message ? `: ${x.message}` : ''}`);
+            .map((x) => `${x.target || x.platform}${x.message ? `: ${x.message}` : ''}`);
         if (d.status !== 'completed' && !failed.length) failed.push('every platform');
         const url = (d.results || []).find((x) => x.url)?.url || null;
+        // A browser post can go to several channels: one link each.
+        const links = (d.results || []).filter((x) => x.url).map((x) => ({ url: x.url, label: x.target || x.platform }));
         const message = (d.results || []).find((x) => x.success && x.message)?.message || null;
-        return { done: d.status === 'completed', failed, url, message };
+        return { done: d.status === 'completed', failed, url, links, message };
     }
     return { done: false, failed: [] };
 }
@@ -244,6 +248,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // is off or unknown, which hides the choice and leaves Upload-Post alone.
     const [provider, setProvider] = useState('upload_post');
     const [browserPlatforms, setBrowserPlatforms] = useState(null);
+    // Saved browser accounts, and the account/channel destinations picked.
+    const [browserAccounts, setBrowserAccounts] = useState([]);
+    const [browserTargets, setBrowserTargets] = useState([]);
+    const [targetOverrides, setTargetOverrides] = useState({});
     const [visibility, setVisibility] = useState('public');
     const viaBrowser = provider === 'browser';
     const [showThumbModal, setShowThumbModal] = useState(false);
@@ -328,6 +336,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         setPostResult(null);
         if (next === 'browser') {
             setIsScheduling(false);
+            // Keep the one-click case: the first destination is picked.
+            const first = browserAccounts.find((a) => a.has_profile);
+            setBrowserTargets(first ? [accountTargets(first)[0]].map(({ account_id, channel_id }) => ({ account_id, channel_id })) : []);
+            setTargetOverrides({});
             setPlatforms({
                 tiktok: (browserPlatforms || []).includes('tiktok'),
                 instagram: (browserPlatforms || []).includes('instagram'),
@@ -337,6 +349,20 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             setPlatforms(uploadPostPlatforms());
         }
     };
+
+    // Browser posting stays hidden unless it is switched on here. Once on, the
+    // choice shows even with no account yet, so the first one can be added.
+    const loadBrowserStatus = useCallback(() => apiFetch('/api/social/browser/status')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+            setBrowserPlatforms(d?.enabled && d.playwright ? (d.platforms || []) : null);
+            const accounts = d?.enabled ? (d.accounts || []) : [];
+            setBrowserAccounts(accounts);
+            // Drop picks whose account or channel no longer exists.
+            const valid = new Set(accounts.filter((a) => a.has_profile).flatMap(accountTargets).map(targetKey));
+            setBrowserTargets((cur) => cur.filter((t) => valid.has(targetKey(t))));
+        })
+        .catch(() => setBrowserPlatforms(null)), []);
 
     const handleConnectAccounts = () => {
         setShowModal(false);
@@ -356,10 +382,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             setVisibility('public');
             // Only preselect platforms the profile can actually publish to.
             if (knownConnections) setPlatforms(uploadPostPlatforms());
-            apiFetch('/api/social/browser/status')
-                .then((r) => (r.ok ? r.json() : null))
-                .then((d) => setBrowserPlatforms(d?.enabled && d.platforms?.length ? d.platforms : null))
-                .catch(() => setBrowserPlatforms(null));
+            setBrowserTargets([]);
+            setTargetOverrides({});
+            loadBrowserStatus();
             apiFetch(`/api/clip/${jobId}/${index}/thumbnails`)
                 .then((r) => (r.ok ? r.json() : null))
                 .then((d) => { if (d) setThumbnails(d.thumbnails || []); })
@@ -774,9 +799,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             return;
         }
 
-        const selectedPlatforms = Object.keys(platforms).filter(k => platforms[k]);
+        const platformOf = (t) => browserAccounts.find((a) => a.id === t.account_id)?.platform;
+        const selectedPlatforms = viaBrowser
+            ? [...new Set(browserTargets.map(platformOf).filter(Boolean))]
+            : Object.keys(platforms).filter(k => platforms[k]);
         if (selectedPlatforms.length === 0) {
-            setPostResult({ success: false, msg: "Select at least one platform." });
+            setPostResult({ success: false, msg: viaBrowser ? "Select at least one account or channel." : "Select at least one platform." });
             return;
         }
 
@@ -796,7 +824,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 title: postTitle,
                 description: postDescription,
                 ...(viaBrowser
-                    ? { provider: 'browser', visibility, ...(selectedThumb ? { thumbnail: selectedThumb } : {}) }
+                    ? {
+                        provider: 'browser', visibility, ...(selectedThumb ? { thumbnail: selectedThumb } : {}),
+                        targets: browserTargets.map((t) => {
+                            const o = targetOverrides[targetKey(t)] || {};
+                            return {
+                                account_id: t.account_id,
+                                ...(t.channel_id ? { channel_id: t.channel_id } : {}),
+                                ...(o.title?.trim() ? { title: o.title.trim() } : {}),
+                                ...(o.description?.trim() ? { description: o.description.trim() } : {}),
+                            };
+                        }),
+                    }
                     : { api_key: uploadPostKey, user_id: uploadUserId }),
             };
 
@@ -831,14 +870,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             }
             // A 200 only means Upload-Post took the file: follow the post to
             // its real end, so a platform that fails says so here.
-            setPostResult({ success: true, msg: viaBrowser ? "Uploading in a Chrome window: leave it open until it closes." : "Publishing…" });
+            setPostResult({ success: true, msg: viaBrowser
+                ? (browserTargets.length > 1
+                    ? `Uploading to ${browserTargets.length} destinations, one Chrome window after another: leave each open until it closes.`
+                    : "Uploading in a Chrome window: leave it open until it closes.")
+                : "Publishing…" });
             const outcome = viaBrowser ? await followPost(sent.request_id, BROWSER_POST_TRIES) : await followPost(sent.request_id);
             if (outcome.failed.length) {
-                setPostResult({ success: false, msg: `Failed on ${outcome.failed.join('; ')}` });
+                setPostResult({ success: false, msg: `Failed on ${outcome.failed.join('; ')}`, links: outcome.links });
                 track('SocialPostFailed', { props: { platforms: selectedPlatforms.join(',') } });
             } else if (viaBrowser && outcome.done) {
                 // Stays open so the link to the new video can be followed.
-                setPostResult({ success: true, msg: outcome.message || "Posted successfully!", url: outcome.url });
+                setPostResult({ success: true, msg: outcome.message || "Posted successfully!", url: outcome.url, links: outcome.links });
             } else {
                 setPostResult({ success: true, msg: outcome.done ? "Posted successfully!" : "Still publishing: check your accounts in a few minutes." });
                 setTimeout(() => {
@@ -1211,9 +1254,24 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             <SegmentedControl options={PROVIDER_OPTIONS} value={provider} onChange={chooseProvider} />
                             {viaBrowser && (
                                 <p className="text-xs text-muted leading-snug mt-2 lowercase">
-                                    Uses the account logged in on this computer. A Chrome window opens and uploads through YouTube Studio.
+                                    Uses accounts logged in on this computer. A Chrome window opens and uploads through YouTube Studio.
                                 </p>
                             )}
+                        </div>
+                    )}
+
+                    {viaBrowser && (
+                        <div>
+                            <label className="eyebrow block mb-2">POST TO</label>
+                            <BrowserAccountsPicker
+                                accounts={browserAccounts}
+                                onReload={loadBrowserStatus}
+                                selected={browserTargets}
+                                onSelectedChange={setBrowserTargets}
+                                overrides={targetOverrides}
+                                onOverridesChange={setTargetOverrides}
+                                defaultTitle={postTitle}
+                            />
                         </div>
                     )}
 
@@ -1294,8 +1352,8 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         )}
                     </div>}
 
-                    {/* Platforms */}
-                    <div>
+                    {/* Platforms (a browser post picks accounts and channels above) */}
+                    {!viaBrowser && <div>
                         <label className="eyebrow block mb-2">PLATFORMS</label>
                         <SegmentedControl
                             multi
@@ -1308,14 +1366,16 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                                 youtube: arr.includes('youtube'),
                             })}
                         />
-                    </div>
+                    </div>}
 
                     {postResult && (
                         <div className={postResult.success ? 'badge-ok' : 'badge-danger'}>
                             {postResult.success ? <Check size={12} className="shrink-0" /> : <AlertCircle size={12} className="shrink-0" />}
                             {postResult.msg}
-                            {postResult.url && (
-                                <a href={postResult.url} target="_blank" rel="noopener noreferrer" className="underline ml-1">open video</a>
+                            {postResult.links?.length > 1 ? postResult.links.map((l) => (
+                                <a key={l.url} href={l.url} target="_blank" rel="noopener noreferrer" className="underline ml-1">{l.label}</a>
+                            )) : (postResult.url || postResult.links?.[0]?.url) && (
+                                <a href={postResult.url || postResult.links[0].url} target="_blank" rel="noopener noreferrer" className="underline ml-1">open video</a>
                             )}
                         </div>
                     )}

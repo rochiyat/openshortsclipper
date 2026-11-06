@@ -47,14 +47,16 @@ def wait_final(client, request_id):
 
 
 def test_status_lists_platforms_with_a_profile(api):
-    r = TestClient(api.app, client=LOCAL).get("/api/social/browser/status")
-    assert r.json() == {"enabled": True, "platforms": ["youtube"]}
+    data = TestClient(api.app, client=LOCAL).get("/api/social/browser/status").json()
+    assert data["enabled"] is True and data["platforms"] == ["youtube"]
+    # The profile made before accounts existed is taken in as an account.
+    assert [a["id"] for a in data["accounts"]] == ["youtube-default"]
 
 
 def test_off_unless_switched_on(api, monkeypatch):
     monkeypatch.delenv("BROWSER_POST_ENABLED")
     client = TestClient(api.app, client=LOCAL)
-    assert client.get("/api/social/browser/status").json() == {"enabled": False, "platforms": []}
+    assert client.get("/api/social/browser/status").json() == {"enabled": False, "platforms": [], "accounts": []}
     assert client.post("/api/social/post", json=body()).status_code == 403
 
 
@@ -134,7 +136,9 @@ def test_a_failed_post_reports_why(api, monkeypatch):
     client = TestClient(api.app, client=LOCAL)
     final = wait_final(client, client.post("/api/social/post", json=body()).json()["request_id"])
     assert final["status"] == "failed"
-    assert final["results"][0] == {"platform": "youtube", "success": False, "message": "Google is asking", "url": None}
+    assert final["results"][0] == {"platform": "youtube", "success": False, "message": "Google is asking", "url": None,
+                                   "account_id": "youtube-default", "channel_id": None,
+                                   "target": "youtube (existing login)"}
 
 
 def test_a_crashing_worker_still_ends_the_post(api, monkeypatch):
