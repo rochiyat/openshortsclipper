@@ -80,6 +80,19 @@ the old 20% spot, so a clip with no face renders as before; the text shrinks
 MediaPipe means the old spot. An explicit top / center / bottom is drawn
 exactly there. The browser preview cannot see faces and draws auto at the top.
 
+## How the hook comes in (`hooks.ANIMATIONS`)
+
+`/api/hook` takes `animation` (`none` / `fade` / `slide-up` / `spring`, the
+editor's "Entrance" control) and the server render draws it as the Remotion
+preview does (`remotion/compositions/HookOverlay.tsx`; keep the timings in
+step): fade over 0.5 s, slide-up 60 px of 1920 on a spring, spring grows
+0.7 → 1 around the box's centre, and every animation fades out over the last
+0.5 s of a timed hook. With an animation the hook image is a looped 30 fps
+input cut at the hook's duration, so the graph still reads `[0:v]` once and
+the GPU decode rewrite applies; the lazy recipe keeps the animation so
+`materialize` replays it. No animation (the default, and the pipeline's unless
+`AUTO_HOOK_ANIMATION` is set) is the still overlay with a hard cut.
+
 ## Reframing modes
 
 **A source already shot vertical is passed through untouched.**

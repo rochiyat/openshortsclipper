@@ -667,6 +667,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     style: payload.style || 'pill',
                     font: payload.font || null,
                     duration_seconds: payload.remotion?.displayDurationSec ?? null,
+                    animation: payload.remotion?.entranceAnimation ?? null,
                     input_filename: serverVideoFile
                 })
             });
@@ -1428,7 +1429,6 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}
                 existingSubtitles={activeLayers.subtitles}
                 hasCaptions={!!activeLayers.subtitles || /(^|_)subtitled_/.test(serverVideoFile || '')}
-                serverRender={hasServerBurns}
                 burnedHook={burnedHook}
                 onRemove={burnedHook ? handleRemoveHook : null}
             />

@@ -57,7 +57,7 @@ function loadHookPrefs() {
     try { return JSON.parse(localStorage.getItem('os_hook_prefs')) || {}; } catch { return {}; }
 }
 
-export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook }) {
+export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles, hasCaptions, burnedHook }) {
     const prefs = loadHookPrefs();
     const [text, setText] = useState(initialText || 'POV: You are using the viral hook feature');
     // Stored as `pos`, not `position`: before 'auto' existed every save wrote
@@ -244,8 +244,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                             />
                         </div>
 
-                        {/* Entrance Animation (new) */}
-                        {!serverRender && (
+                        {/* Entrance animation: the server render draws it too (hooks.ANIMATIONS). */}
                         <div>
                             <p className="eyebrow mb-2">Entrance</p>
                             <SegmentedControl
@@ -256,7 +255,6 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                                 size="sm"
                             />
                         </div>
-                        )}
 
                         {/* Display Duration (new) */}
                         <div>

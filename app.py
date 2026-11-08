@@ -6007,6 +6007,9 @@ class HookRequest(BaseModel):
     duration_seconds: Optional[float] = None  # None = hook visible for the whole clip
     style: Optional[str] = "pill"  # pill/classic/dark/yellow/red/outline/outline_yellow
     font: Optional[str] = None  # montserrat/anton/serif (hooks.HOOK_FONTS); None = the style's own
+    # Entrance animation (hooks.ANIMATIONS: none/fade/slide-up/spring), as the
+    # dashboard previews it. None = the hard cut in and out.
+    animation: Optional[str] = None
     remove: Optional[bool] = False  # strip the burned hook instead of adding one
 
 @app.post("/api/hook")
@@ -6085,6 +6088,7 @@ async def add_hook(req: HookRequest, request: Request):
                 return add_hook_to_video(
                     input_path, req.text, output_path, position=req.position or "auto",
                     font_scale=font_scale, duration=req.duration_seconds, style=req.style,
+                    animation=req.animation,
                     font=req.font, layout_ranges=clip_data.get('layout_ranges'),
                     has_captions=had_captions)
 
@@ -6116,7 +6120,7 @@ async def add_hook(req: HookRequest, request: Request):
     else:
         clip_data['auto_hook'] = {
             "text": req.text, "style": req.style, "font": req.font, "position": req.position,
-            "duration_seconds": req.duration_seconds,
+            "duration_seconds": req.duration_seconds, "animation": req.animation,
         }
 
     # Update Persistence (Same logic as subtitles)

@@ -4,6 +4,7 @@ import re
 import shutil
 import textwrap
 import subprocess
+import sys
 import urllib.request
 import uuid
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -472,7 +473,7 @@ def _auto_place(video_path, text, target_box_width, hook_filename, font_scale, s
 
 def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="pill",
                       also=None, font=None, layout_ranges=None, has_captions=True,
-                      mark=None):
+                      mark=None, animation=None):
     """
     Overlays text hook onto video.
     position: 'top', 'center', 'bottom', or 'auto' (hook_placement: off the
@@ -484,6 +485,9 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
       the clip's own ``.layout.json`` sidecar.
     font_scale: float multiplier (1.0 = default)
     style: hook look (see HOOK_STYLES)
+    animation: entrance animation (see ANIMATIONS), as the dashboard preview
+      (remotion/compositions/HookOverlay.tsx) draws it, plus its 0.5 s exit
+      fade when ``duration`` is set. None keeps the hard cut in and out.
     also: optional (vf, path): ALSO write ``path`` = the hooked picture with
       ``vf`` applied (the captions), from the same decode. The editor
       re-captions from the hooked-only picture, but most clips are never
@@ -497,6 +501,7 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video {video_path} not found")
+    animation = normalise_animation(animation)
 
     # 1. Probe video width to scale text properly
     try:
@@ -552,7 +557,9 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
         # 4. FFmpeg Command
         print(f"🎬 Overlaying hook: '{text}' at {overlay_x},{overlay_y}")
         
-        overlay = _overlay_graph(overlay_x, overlay_y, duration)
+        anim = _anim_spec(animation, box_w, box_h, video_height)
+        overlay = _overlay_graph(overlay_x, overlay_y, duration, anim)
+        image_in = _image_input(img_path, duration, anim)
         tail = _encode_tail()
         lazy = also is not None and LAZY
         hooked_out = [] if lazy else ['-map', '[h]', '-map', '0:a?', *tail, output_path]
@@ -566,7 +573,7 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', video_path,
-                '-i', img_path,
+                *image_in,
                 '-i', logo_path,
                 '-filter_complex', graph,
                 *hooked_out,
@@ -580,13 +587,13 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', video_path,
-                '-i', img_path,
+                *image_in,
                 '-filter_complex', graph,
                 *hooked_out,
                 '-map', '[s]', '-map', '0:a?', *tail, extra_path,
             ]
         else:
-            ffmpeg_cmd = _overlay_cmd(video_path, img_path, overlay, output_path)
+            ffmpeg_cmd = _overlay_cmd(video_path, image_in, overlay, output_path)
 
         outputs = [] if lazy else [output_path]
         if also:
@@ -599,12 +606,13 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
                                                 result.stdout, result.stderr)
         if lazy:
             try:
-                _write_recipe(output_path, video_path, img_path, overlay_x, overlay_y, duration)
+                _write_recipe(output_path, video_path, img_path, overlay_x, overlay_y, duration,
+                              anim)
                 print(f"✅ Hook added to {also[1]} ({os.path.basename(output_path)} on demand)")
             except Exception as e:
                 # No recipe, no on-demand file: encode the hooked picture now.
                 print(f"⚠️ Hook recipe not kept ({e}); encoding {output_path} now")
-                cmd = _overlay_cmd(video_path, img_path, overlay, output_path)
+                cmd = _overlay_cmd(video_path, image_in, overlay, output_path)
                 done = _run_encode(cmd, video_path, [output_path])
                 if done.returncode != 0 and not finished_before_crash(done, [output_path]):
                     raise subprocess.CalledProcessError(done.returncode, cmd,
@@ -637,9 +645,92 @@ LAZY = os.environ.get("HOOK_LAZY", "1").strip() != "0"
 RECIPE_PREFIX = ".hookrecipe_"
 
 
-def _overlay_graph(x, y, duration):
-    return (f"[0:v][1:v]overlay={x}:{y}"
-            + (f":enable='between(t,0,{float(duration)})'" if duration else ""))
+# Entrance animations, mirroring the dashboard preview
+# (dashboard/src/remotion/compositions/HookOverlay.tsx, keep both in step):
+#   fade      opacity 0 -> 1 over 15 frames (0.5 s at 30 fps)
+#   slide-up  rises 60 px (of 1920) on a spring, fading in
+#   spring    "Bounce": grows 0.7 -> 1 on a spring with a little overshoot
+#   none      no entrance
+# Every animation also fades out over the last 0.5 s of a timed hook, as the
+# preview does. Remotion's springs are closed-form here: an underdamped spring
+# settles as 1 - exp(-a t) (cos(w t) + a/w sin(w t)), with a = damping/(2 mass)
+# and w = sqrt(stiffness/mass - a^2) (slide-up: mass 1, stiffness 150,
+# damping 18; spring: mass 0.8, stiffness 200, damping 15).
+ANIMATIONS = ("none", "fade", "slide-up", "spring")
+ANIM_FPS = 30
+EXIT_FADE = 0.5
+_FADE_IN = {"none": 0.0, "fade": 0.5, "slide-up": 0.3, "spring": 0.25}
+_SLIDE = (9.0, 8.31)       # (a, w) of the slide-up spring
+_BOUNCE = (9.375, 12.73)   # (a, w) of the bounce spring
+SLIDE_PX_1920 = 60
+BOUNCE_FROM = 0.7
+
+
+def normalise_animation(animation):
+    """The animation name, or None (no animation, the legacy hard cut) for
+    anything unknown. The preview's "bounce" label is the "spring" key."""
+    if not animation:
+        return None
+    animation = str(animation).strip().lower()
+    if animation == "bounce":
+        animation = "spring"
+    return animation if animation in ANIMATIONS else None
+
+
+def _spring_left(a, w):
+    """1 - spring progress at time t, as an ffmpeg expression."""
+    return f"exp(-{a}*t)*(cos({w}*t)+{a / w:.4f}*sin({w}*t))"
+
+
+def _anim_spec(animation, box_w, box_h, video_height):
+    """What _overlay_graph needs to draw ``animation`` (JSON-safe: the recipe
+    keeps it), or None for no animation."""
+    if not animation:
+        return None
+    return {"name": animation, "w": int(box_w), "h": int(box_h),
+            "slide": max(1, round(SLIDE_PX_1920 * video_height / 1920))}
+
+
+def _image_input(img_path, duration, anim):
+    """The hook image's ffmpeg input. A still for the plain overlay; a looped
+    stream (cut at ``duration``) when the overlay changes frame to frame."""
+    if not anim:
+        return ['-i', img_path]
+    args = ['-loop', '1', '-framerate', str(ANIM_FPS)]
+    if duration:
+        args += ['-t', f"{float(duration):g}"]
+    return [*args, '-i', img_path]
+
+
+def _overlay_graph(x, y, duration, anim=None):
+    enable = f":enable='between(t,0,{float(duration)})'" if duration else ""
+    if not anim:
+        return f"[0:v][1:v]overlay={x}:{y}" + enable
+    name = anim["name"]
+    chain = ["format=rgba"]
+    ox, oy = str(x), str(y)
+    if name == "spring":
+        scale = f"1-{1 - BOUNCE_FROM:g}*{_spring_left(*_BOUNCE)}"
+        # Settled after a second: stop resizing the picture every frame.
+        chain.append(f"scale=w='if(lt(t,1),max(2,iw*({scale})),iw)'"
+                     f":h='if(lt(t,1),max(2,ih*({scale})),ih)':eval=frame")
+        # Grow from the box's centre, where the still one sits.
+        ox = f"'{x}+({anim['w']}-w)/2'"
+        oy = f"'{y}+({anim['h']}-h)/2'"
+    elif name == "slide-up":
+        oy = f"'{y}+{anim['slide']}*{_spring_left(*_SLIDE)}'"
+    fade_in = _FADE_IN.get(name, 0.0)
+    if fade_in:
+        chain.append(f"fade=t=in:st=0:d={fade_in:g}:alpha=1")
+    if duration:
+        d = float(duration)
+        out = min(EXIT_FADE, d)
+        chain.append(f"fade=t=out:st={max(0.0, d - out):g}:d={out:g}:alpha=1")
+    # The looped image ends at ``duration`` (pass the video on after it) or
+    # never (end with the video).
+    end = ":eof_action=pass" if duration else ":shortest=1"
+    return (f"[1:v]{','.join(chain)}[hk];"
+            f"[0:v][hk]overlay=x={ox}:y={oy}{end}{enable}")
 
 
 def _encode_tail():
@@ -647,8 +738,9 @@ def _encode_tail():
             '-movflags', '+faststart']
 
 
-def _overlay_cmd(video_path, img_path, overlay, output_path):
-    return ['ffmpeg', '-y', '-i', video_path, '-i', img_path,
+def _overlay_cmd(video_path, image_in, overlay, output_path):
+    """``image_in``: the hook image's input args (_image_input)."""
+    return ['ffmpeg', '-y', '-i', video_path, *image_in,
             '-filter_complex', overlay, *_encode_tail(), output_path]
 
 
@@ -671,7 +763,7 @@ def has_recipe(output_dir, hooked_name):
     return os.path.exists(recipe_paths(output_dir, hooked_name)[0])
 
 
-def _write_recipe(output_path, video_path, img_path, x, y, duration):
+def _write_recipe(output_path, video_path, img_path, x, y, duration, anim=None):
     """Keep what it takes to encode ``output_path`` later: the overlay image
     and where it went. The source must sit in the same directory."""
     output_dir = os.path.dirname(output_path)
@@ -684,7 +776,7 @@ def _write_recipe(output_path, video_path, img_path, x, y, duration):
     shutil.copyfile(img_path, png_path)
     with open(json_path, "w") as f:
         json.dump({"source": os.path.basename(video_path), "x": x, "y": y,
-                   "duration": duration}, f)
+                   "duration": duration, "animation": anim}, f)
 
 
 def materialize(output_dir, hooked_name):
@@ -705,7 +797,11 @@ def materialize(output_dir, hooked_name):
     if not (os.path.exists(source) and os.path.exists(png_path)):
         return False
     tmp = os.path.join(output_dir, f".part_{uuid.uuid4().hex[:8]}_{hooked_name}")
-    cmd = _overlay_cmd(source, png_path, _overlay_graph(r["x"], r["y"], r.get("duration")), tmp)
+    anim = r.get("animation")
+    if not (isinstance(anim, dict) and normalise_animation(anim.get("name"))):
+        anim = None
+    cmd = _overlay_cmd(source, _image_input(png_path, r.get("duration"), anim),
+                       _overlay_graph(r["x"], r["y"], r.get("duration"), anim), tmp)
     try:
         result = _run_encode(cmd, source, [tmp])
         if result.returncode != 0 and not finished_before_crash(result, [tmp]):

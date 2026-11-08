@@ -1394,14 +1394,18 @@ def auto_hook_clip(clip_path, clip, captions=None, mark=False):
     if not text:
         return None
     style = os.environ.get("AUTO_HOOK_STYLE", "pill")
+    # Unset: the hard cut in and out. none/fade/slide-up/spring (hooks.ANIMATIONS).
+    animation = os.environ.get("AUTO_HOOK_ANIMATION") or None
     try:
         seconds = float(os.environ.get("AUTO_HOOK_SECONDS", "5"))
     except ValueError:
         seconds = 5.0
     try:
         from hooks import add_hook_to_video, HOOK_STYLES
+        from hooks import normalise_animation
         if style not in HOOK_STYLES:
             style = "pill"
+        animation = normalise_animation(animation)
         output_dir = os.path.dirname(clip_path)
         out_path = os.path.join(
             output_dir, f"hooked_{int(time.time())}_{os.path.basename(clip_path)}")
@@ -1409,8 +1413,10 @@ def auto_hook_clip(clip_path, clip, captions=None, mark=False):
         # the layout ranges say where the captions sit (the seam on SPLIT).
         config = {"text": text, "style": style, "position": "auto",
                   "duration_seconds": seconds}
+        if animation:
+            config["animation"] = animation
         place = {"position": "auto", "layout_ranges": clip.get('layout_ranges'),
-                 "has_captions": bool(captions)}
+                 "has_captions": bool(captions), "animation": animation}
 
         def note(result):
             if isinstance(result, dict) and result.get("y") is not None:
